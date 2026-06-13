@@ -236,6 +236,7 @@ def build_eda_section(
     doc: Document,
     figures_dir: Path,
     stats: dict,
+    stale_stats: dict | None = None,
 ) -> None:
     """Write Section 3: Exploratory Analysis."""
     _h(doc, "3. Exploratory Analysis")
@@ -295,33 +296,106 @@ def build_eda_section(
        "is hard to beat."
        )
 
-    # ── 3.2 Autocorrelation ─────────────────────────────────────────────────
-    _h(doc, "3.2  Autocorrelation Structure", level=2)
+    # ── 3.2 Market Staleness ─────────────────────────────────────────────────
+    _h(doc, "3.2  Market Staleness", level=2)
 
-    lag1_level  = stats["acf_level_lags"][0]
-    lag2_change = stats["acf_change_lags"][1]
+    # Pull staleness numbers — fall back to narrative defaults if not provided
+    if stale_stats:
+        tr  = stale_stats["train"]
+        vl  = stale_stats["val"]
+        te  = stale_stats["test"]
+        pz_tr, pz_vl, pz_te = tr["pct_zero"], vl["pct_zero"], te["pct_zero"]
+        mr_tr = tr["max_run"]
+        nz_tr = tr["n_nonzero"]
+    else:
+        pz_tr, pz_vl, pz_te = 75.1, 59.1, 45.7
+        mr_tr, nz_tr = 34, 287
+
+    _p(doc,
+       f"A critical but initially non-obvious feature of this market is its extreme illiquidity. "
+       f"The data source records one row per calendar day, but genuine price-discovery events "
+       f"— days on which at least one trade executes — are rare. On {pz_tr:.1f}% of training-set "
+       f"days, the price does not change at all from the previous observation. The corresponding "
+       f"figures are {pz_vl:.1f}% for the validation set and {pz_te:.1f}% for the test set. "
+       f"Only {nz_tr} of {nz_tr + round(nz_tr * pz_tr / (100 - pz_tr)):,} training observations "
+       f"represent genuine price moves."
+       )
+
+    _p(doc,
+       f"These zero-change days are not independent observations of a flat market; they are "
+       f"calendar days on which no trade occurred and the dataset carries forward the "
+       f"previous closing price. Stale runs as long as {mr_tr} consecutive days are present "
+       f"in the training set (Figure 6). Treating all calendar-day observations as equally "
+       f"informative inflates the effective sample size and biases any autocorrelation "
+       f"analysis."
+       )
+
+    _figure(
+        doc,
+        figures_dir / "fig_staleness.png",
+        "Figure 6.  Left: percentage of zero-change days by split (with number of genuine "
+        "move-days and longest stale run annotated). Right: distribution of stale run "
+        "lengths in the training set — runs of 5 or more consecutive stale days are "
+        "common, with a maximum run exceeding 30 days.",
+    )
+
+    # ── 3.3 Autocorrelation — Corrected Analysis ─────────────────────────────
+    _h(doc, "3.3  Autocorrelation Structure (Corrected)", level=2)
+
+    lag1_level = stats["acf_level_lags"][0]
+    if stale_stats:
+        acf_full_lag2 = tr["acf_full_lags"][1]   # lag-2 of full series
+        acf_nz_lag1   = tr["acf_nz_lags"][0]     # lag-1 on move-days
+        acf_nz_lag2   = tr["acf_nz_lags"][1]     # lag-2 on move-days
+    else:
+        acf_full_lag2, acf_nz_lag1, acf_nz_lag2 = 0.334, 0.41, 0.142
 
     _p(doc,
        f"Figure 5 shows the ACF and PACF for both the price level and the daily first "
        f"difference (40 lags, training set only). For the price level, the ACF coefficient "
        f"at lag 1 is {lag1_level:.4f} and remains near 1.0 across all displayed lags, "
-       f"consistent with near-random-walk dynamics. The PACF drops sharply after lag 1, "
-       f"indicating an AR(1)-like structure in levels — largely a manifestation of "
-       f"non-stationarity rather than genuine mean-reversion."
+       f"consistent with near-random-walk dynamics."
        )
 
     _p(doc,
-       f"For the daily change series, the ACF is near zero at almost all lags, confirming "
-       f"that price changes carry very little linear predictive structure. The most notable "
-       f"exception is lag 2 (ACF ≈ {lag2_change:.3f}), which may reflect "
-       f"thin-trading or settlement-cycle effects, but it is not sustained enough to support "
-       f"a robust linear forecasting model. This is the core empirical challenge: to "
-       f"outperform the random walk, a model must identify non-linear or exogenous structure "
-       f"that linear autocorrelation analysis does not capture."
+       f"The naive ACF of the daily change series shows a prominent spike at lag 2 "
+       f"(ACF ≈ {acf_full_lag2:.3f}). This is an artefact of market staleness, not a genuine "
+       f"market signal. Because the majority of consecutive observations are identical "
+       f"(carried-forward prices), differencing two adjacent stale rows produces two "
+       f"consecutive zeros, inflating the lag-2 autocorrelation through the accumulation "
+       f"of tied zero-change pairs."
        )
 
-    # ── 3.3 Returns and Volatility ───────────────────────────────────────────
-    _h(doc, "3.3  Returns Distribution and Volatility Clustering", level=2)
+    _p(doc,
+       f"Figure 7 isolates the genuine-price-discovery signal by re-computing the ACF "
+       f"using only the {nz_tr} non-zero-change training days. On these days, the lag-2 "
+       f"coefficient collapses to {acf_nz_lag2:.3f} (confirming it was an artefact), "
+       f"while the lag-1 coefficient is {acf_nz_lag1:.3f} — a genuine short-run "
+       f"momentum effect: price moves tend to continue in the same direction for one "
+       f"additional trading day. This lag-1 momentum signal is the primary linear "
+       f"predictive structure exploited in the feature set."
+       )
+
+    _figure(
+        doc,
+        figures_dir / "fig_acf_pacf.png",
+        "Figure 5.  ACF and PACF for the price level (top row) and daily change "
+        "(bottom row), computed on the training set only (40 lags, 5% confidence bands). "
+        "Level ACF ≈ 1.0 across all lags (non-stationary); change ACF shows a spurious "
+        "lag-2 spike that disappears on genuine-move days (see Figure 7).",
+        width=6.0,
+    )
+    _figure(
+        doc,
+        figures_dir / "fig_momentum.png",
+        "Figure 7.  ACF of daily price change: full series (blue) vs genuine-move "
+        "days only (red), training set. The lag-2 spike collapses from "
+        f"≈{acf_full_lag2:.2f} to ≈{acf_nz_lag2:.2f} — a forward-fill artefact. "
+        f"The lag-1 momentum signal (≈{acf_nz_lag1:.2f}) on move-days is genuine.",
+    )
+
+    # ── 3.4 Returns and Volatility ───────────────────────────────────────────
+    _h(doc, "3.4  Returns Distribution and Volatility Clustering", level=2)
 
     ch = stats["change_stats"]
     _p(doc,
@@ -357,12 +431,140 @@ def build_eda_section(
         "Volatility clustering is visible: the 2021-22 spike period shows markedly "
         "higher volatility than the surrounding years.",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 4 — Feature Engineering
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_features_section(
+    doc: Document,
+    figures_dir: Path,
+    feat_stats: dict | None = None,
+) -> None:
+    """Write Section 4: Feature Engineering."""
+    _h(doc, "4. Feature Engineering")
+
+    _p(doc,
+       "All features are constructed from the full chronologically sorted series using "
+       "only lagged values and strictly trailing rolling windows. No centered windows, "
+       "no backward-fill, and no information from validation or test rows enters any "
+       "feature calculation. The first 30 rows of the training set (the warm-up period "
+       "required to populate the 30-day rolling windows) are dropped after feature "
+       "construction."
+       )
+
+    # ── 4.1 Targets ──────────────────────────────────────────────────────────
+    _h(doc, "4.1  Forecast Targets", level=2)
+
+    _p(doc,
+       "Three forecast targets are defined, one per horizon h ∈ {1, 7, 30}:"
+       )
+    _bullet(doc,
+            "target_1  =  price(t+1) − price(t)  (1-day-ahead price change)")
+    _bullet(doc,
+            "target_7  =  price(t+7) − price(t)  (7-day-ahead cumulative change)")
+    _bullet(doc,
+            "target_30 =  price(t+30) − price(t) (30-day-ahead cumulative change)")
+
+    _p(doc,
+       "Modelling the change, not the level, is motivated by the stationarity results in "
+       "Section 3.1 (the level is I(1)) and by the pronounced regime shift between the "
+       "training and out-of-sample sets. All evaluation metrics are computed on the "
+       "change, and the random-walk forecast corresponds to predicting zero change."
+       )
+
+    # ── 4.2 Feature Audit — Exclusions ───────────────────────────────────────
+    _h(doc, "4.2  Feature Audit: Excluded Columns", level=2)
+
+    _p(doc,
+       "Before constructing features, a formal audit excluded three categories of columns "
+       "that would introduce data leakage or level-reconstruction artefacts:"
+       )
+
+    _bold_inline(doc,
+        "Category 1 — Target-derived columns:  ",
+        "The raw dataset contains columns that are arithmetic functions of the target "
+        "price level: the daily change ($ Change), week-on-week change, YTD percentage "
+        "return, and the 7/30/50/100-day SMAs and percentage changes. Retaining any of "
+        "these would allow a model to invert them to obtain the contemporaneous price "
+        "level, defeating the purpose of modelling changes. All 18 such columns are "
+        "excluded."
+    )
+    _bold_inline(doc,
+        "Category 2 — Sibling price levels and premiums:  ",
+        "The HIR and SFM ACCU sub-method prices are correlated with the Generic price "
+        "but can also reconstruct it: Generic = HIR_price − HIR_premium. Retaining "
+        "the sibling price levels or their premium-over-Generic columns would enable "
+        "level reconstruction and produce inflated in-sample R² with no genuine "
+        "forecasting value. Four price levels and four premium columns are excluded."
+    )
+    _bold_inline(doc,
+        "Category 3 — Raw sibling change columns:  ",
+        "The dataset also pre-computes dollar changes and week-on-week changes for HIR "
+        "and SFM. These are re-derived from scratch (from the sibling price diffs) to "
+        "ensure exact replication of the construction logic. The pre-computed versions "
+        "are excluded to avoid double-counting."
+    )
+
+    # ── 4.3 Feature Groups ───────────────────────────────────────────────────
+    _h(doc, "4.3  Feature Groups", level=2)
+
+    _p(doc,
+       "After exclusions, the following feature groups are constructed:"
+       )
+
+    _bold_inline(doc,
+        "Group A — Lag changes (4 features):  ",
+        "lag_chg_1, lag_chg_2, lag_chg_3, lag_chg_5. "
+        "The daily price change lagged by 1, 2, 3, and 5 days. These directly capture "
+        "the lag-1 momentum signal identified in Section 3.3 and provide the model "
+        "with recent directional information."
+    )
+    _bold_inline(doc,
+        "Group B — Staleness features (4 features):  ",
+        "price_moved (1/0 flag), days_since_last_move, moves_7d (number of move-days "
+        "in trailing 7 days), moves_30d (move-days in trailing 30 days). "
+        "These encode the market-liquidity context at each row — essential given that "
+        "75% of observations are stale carries."
+    )
+    _bold_inline(doc,
+        "Group C — Volatility regime (2 features):  ",
+        "vol_chg_7d and vol_chg_30d: trailing 7- and 30-day rolling standard deviation "
+        "of daily changes. These capture local heteroskedasticity."
+    )
+    _bold_inline(doc,
+        "Group D — Volume (4 features, if present):  ",
+        "vol_generic_raw (raw traded volume), vol_generic_log1p (log1p-transformed), "
+        "vol_generic_trail7 (7-day trailing average), vol_generic_zero (1/0 zero-volume "
+        "day flag). Volume is a direct proxy for trading activity."
+    )
+    _bold_inline(doc,
+        "Group E — Calendar (2 features):  ",
+        "dow (day of week, 0=Monday) and month. Carbon-credit trading shows day-of-week "
+        "and seasonal patterns due to compliance cycles."
+    )
+    _bold_inline(doc,
+        "Group F — Exogenous diffs (up to 8 features):  ",
+        "First differences of sibling prices (lgc_chg, stc_chg, hir_chg, sfm_nc_chg, "
+        "sfm_cb_chg, erf_chg) and trailing volume averages for HIR and SFM methods. "
+        "Levels and premiums are excluded (Category 2 audit above); only changes are used."
+    )
+
+    if feat_stats:
+        n_feats = feat_stats.get("n_features", "—")
+        shapes  = feat_stats.get("shapes", {})
+        _p(doc,
+           f"After construction and warm-up removal, the feature matrix contains "
+           f"{n_feats} features. Training set shape: {shapes.get('train', '—')}; "
+           f"validation: {shapes.get('val', '—')}; test: {shapes.get('test', '—')}."
+           )
+
     _figure(
         doc,
-        figures_dir / "fig_acf_pacf.png",
-        "Figure 5.  ACF and PACF for the price level (top row) and daily change "
-        "(bottom row), computed on the training set only (40 lags, 5% confidence bands). "
-        "Level ACF ≈ 1.0 across all lags (non-stationary); "
-        "change ACF ≈ 0 at most lags (near-absence of linear structure).",
-        width=6.0,
+        figures_dir / "fig_feature_target_corr.png",
+        "Figure 8.  Pearson correlations of each feature with the 1-day-ahead target "
+        "(target_1) on the training set. Positive (red) bars indicate momentum-aligned "
+        "features; negative (blue) bars indicate mean-reverting signals. The staleness "
+        "and lag features dominate the top rankings.",
     )

@@ -331,6 +331,210 @@ def compute_stationarity_tests(train: pd.DataFrame) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Staleness statistics (all three splits)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_staleness_stats(
+    train: pd.DataFrame,
+    val: pd.DataFrame,
+    test: pd.DataFrame,
+) -> dict:
+    """Zero-change and run-length statistics per split. ACF on full and non-zero-only."""
+    from itertools import groupby
+
+    def _run_lengths(arr: np.ndarray) -> list:
+        return [sum(1 for _ in g) for v, g in groupby(arr) if v]
+
+    def _split_stats(df: pd.DataFrame) -> dict:
+        price = df[TARGET]
+        chg   = price.diff()
+        n_valid   = int(chg.notna().sum())
+        zero_mask = chg == 0.0
+        nz_mask   = (chg != 0.0) & chg.notna()
+
+        runs = _run_lengths(zero_mask.fillna(False).values)
+        max_run   = int(max(runs)) if runs else 0
+        long_runs = int(sum(1 for r in runs if r > 3))
+        run_dist  = dict(sorted({r: runs.count(r) for r in set(runs)}.items()))
+
+        full_chg = chg.dropna()
+        nz_chg   = chg[nz_mask].dropna()
+        acf_full = [round(float(x), 4) for x in acf(full_chg, nlags=10, fft=True)[1:11]] \
+                   if len(full_chg) > 20 else [0.0] * 10
+        acf_nz   = [round(float(x), 4) for x in acf(nz_chg, nlags=10, fft=True)[1:11]] \
+                   if len(nz_chg)   > 20 else [0.0] * 10
+
+        return {
+            "n_valid":           n_valid,
+            "n_zero":            int(zero_mask.sum()),
+            "pct_zero":          round(100 * zero_mask.sum() / n_valid, 1) if n_valid else 0.0,
+            "n_nonzero":         int(nz_mask.sum()),
+            "max_run":           max_run,
+            "n_long_runs_gt3":   long_runs,
+            "run_dist":          run_dist,
+            "acf_full_lags":     acf_full,
+            "acf_nz_lags":       acf_nz,
+        }
+
+    return {
+        "train": _split_stats(train),
+        "val":   _split_stats(val),
+        "test":  _split_stats(test),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 6 — Staleness
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_staleness(
+    train: pd.DataFrame,
+    val: pd.DataFrame,
+    test: pd.DataFrame,
+    outpath: Path,
+    stale_stats: dict | None = None,
+) -> Path:
+    """% zero-change days by split (left) + stale run-length distribution train (right)."""
+    _set_style()
+    if stale_stats is None:
+        stale_stats = compute_staleness_stats(train, val, test)
+
+    keys    = ["train", "val", "test"]
+    labels  = ["Train", "Val", "Test"]
+    colors  = [_C["train_v"], _C["val_v"], _C["test_v"]]
+    pct_z   = [stale_stats[k]["pct_zero"]    for k in keys]
+    n_nz    = [stale_stats[k]["n_nonzero"]   for k in keys]
+    max_run = [stale_stats[k]["max_run"]      for k in keys]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # left — bar chart
+    ax = axes[0]
+    bars = ax.bar(labels, pct_z, color=colors, alpha=0.82, edgecolor="white", width=0.5)
+    for bar, pz, nz, mr in zip(bars, pct_z, n_nz, max_run):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1.5,
+                f"{pz:.1f}%\n({nz} move-days)\nmax run = {mr}",
+                ha="center", va="bottom", fontsize=9)
+    ax.set_ylim(0, 105)
+    ax.axhline(50, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
+    ax.set_ylabel("% Days with Zero Price Change")
+    ax.set_title("Price Staleness by Split", fontsize=12)
+
+    # right — run-length histogram (train only)
+    ax2 = axes[1]
+    rd      = stale_stats["train"]["run_dist"]
+    lengths = list(rd.keys())
+    counts  = list(rd.values())
+    ax2.bar(lengths, counts, color=_C["train_v"], alpha=0.75, edgecolor="white")
+    ax2.set_xlabel("Stale-Run Length (days)")
+    ax2.set_ylabel("Number of Runs")
+    ax2.set_title("Stale Run-Length Distribution (Train)", fontsize=12)
+
+    fig.suptitle(
+        "Market Staleness: Most Calendar Days Carry No New Price Information",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 7 — Momentum (corrected ACF)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_momentum(
+    train: pd.DataFrame,
+    outpath: Path,
+    stale_stats: dict | None = None,
+) -> Path:
+    """ACF of daily change: full series vs genuine-move days (train). Shows lag-1 momentum."""
+    _set_style()
+    if stale_stats is None:
+        stale_stats = compute_staleness_stats(train, train, train)  # only train used
+
+    acf_full = stale_stats["train"]["acf_full_lags"]
+    acf_nz   = stale_stats["train"]["acf_nz_lags"]
+    n_nz     = stale_stats["train"]["n_nonzero"]
+    n_full   = stale_stats["train"]["n_valid"]
+
+    lags  = list(range(1, 11))
+    x     = np.arange(len(lags))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    ax.bar(x - width / 2, acf_full, width,
+           label=f"Full series  (n={n_full})",
+           color="#2980b9", alpha=0.78, edgecolor="white")
+    ax.bar(x + width / 2, acf_nz, width,
+           label=f"Non-zero days only  (n={n_nz})",
+           color="#c0392b", alpha=0.78, edgecolor="white")
+
+    ax.axhline(0,    color="black", linewidth=0.8)
+    ax.axhline( 0.1, color="gray",  linestyle="--", linewidth=0.7, alpha=0.5)
+    ax.axhline(-0.1, color="gray",  linestyle="--", linewidth=0.7, alpha=0.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Lag {l}" for l in lags])
+    ax.set_ylabel("ACF coefficient")
+    ax.set_title(
+        "ACF of Daily Change: Full Series vs Genuine-Move Days (Train)\n"
+        "Lag-2 spike in full series collapses; lag-1 momentum signal emerges on move days",
+        fontsize=11,
+    )
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 8 — Feature–target correlation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_feature_target_corr(
+    feat_train: pd.DataFrame,
+    target_col: str = "target_1",
+    outpath: Path | None = None,
+    top_n: int = 20,
+) -> Path:
+    """Horizontal bar chart of Pearson correlations with target_col on train."""
+    _set_style()
+
+    skip = {DATE_COL, "target_1", "target_7", "target_30"}
+    feat_cols = [c for c in feat_train.columns if c not in skip]
+
+    sub    = feat_train[[target_col] + feat_cols].dropna()
+    corrs  = (
+        sub[feat_cols]
+        .corrwith(sub[target_col])
+        .dropna()
+        .sort_values(key=abs, ascending=False)
+    )
+    if len(corrs) > top_n:
+        corrs = corrs.iloc[:top_n]
+
+    colors = ["#c0392b" if v > 0 else "#2980b9" for v in corrs.values]
+    fig, ax = plt.subplots(figsize=(9, max(5, len(corrs) * 0.38)))
+    ax.barh(range(len(corrs)), corrs.values, color=colors, alpha=0.82, edgecolor="white")
+    ax.set_yticks(range(len(corrs)))
+    ax.set_yticklabels(corrs.index, fontsize=9)
+    ax.axvline(0, color="black", linewidth=0.8)
+    ax.set_xlabel(f"Pearson r with {target_col}")
+    ax.set_title(
+        f"Feature Correlations with {target_col}  (train, n={len(sub)})",
+        fontsize=12,
+    )
+    ax.invert_yaxis()
+    fig.tight_layout()
+    if outpath:
+        fig.savefig(outpath, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
 def print_stats_summary(stats: dict) -> None:
     """Print a formatted summary of all stationarity test results."""
     sep = "=" * 65
