@@ -113,16 +113,47 @@ class TestNoFutureLeakage:
                 f"Column '{col}' differs before the perturbed tail"
             )
 
-    def test_lag_shift_is_past_only(self):
-        """lag_chg_1 at row i must equal change at row i-1 (no same-row info)."""
+    def test_chg_0_equals_price_diff(self):
+        """chg_0 must equal price.diff() exactly at every row (including row 0 = NaN)."""
+        prices = [10.0, 11.0, 12.0, 14.0, 13.0, 15.0]
+        df   = _make_df(prices)
+        feat = build_feature_matrix(df, horizons=[1])
+        assert np.isnan(feat["chg_0"].iloc[0])
+        for i in range(1, len(prices)):
+            expected = prices[i] - prices[i - 1]
+            assert abs(feat["chg_0"].iloc[i] - expected) < 1e-9, (
+                f"chg_0 row {i}: expected {expected}, got {feat['chg_0'].iloc[i]}"
+            )
+
+    def test_chg_0_not_affected_by_future(self):
+        """chg_0(t) = price(t)-price(t-1); perturbing price(t+1) must not change chg_0(t)."""
+        prices = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+        df_orig = _make_df(prices)
+        feat_orig = build_feature_matrix(df_orig, horizons=[1])
+
+        prices_pert = prices.copy()
+        prices_pert[-1] = 9999.0   # perturb only the last price
+        df_pert = _make_df(prices_pert)
+        feat_pert = build_feature_matrix(df_pert, horizons=[1])
+
+        # chg_0 at rows 0..n-2 must be unchanged (only last row uses prices[-1])
+        for i in range(len(prices) - 1):
+            v1, v2 = feat_orig["chg_0"].iloc[i], feat_pert["chg_0"].iloc[i]
+            if np.isnan(v1):
+                assert np.isnan(v2)
+            else:
+                assert abs(v1 - v2) < 1e-9, f"chg_0 changed at row {i} after tail perturbation"
+
+    def test_chg_1_equals_prior_day_change(self):
+        """chg_1 at row i must equal price(i-1) - price(i-2), i.e. s(t-1)."""
         prices = [10.0, 11.0, 12.0, 14.0, 13.0, 15.0]
         df = _make_df(prices)
         feat = build_feature_matrix(df, horizons=[1])
         for i in range(2, len(prices)):
-            expected_lag1 = prices[i - 1] - prices[i - 2]
-            obtained = feat["lag_chg_1"].iloc[i]
-            assert abs(obtained - expected_lag1) < 1e-9, (
-                f"row {i}: expected {expected_lag1}, got {obtained}"
+            expected = prices[i - 1] - prices[i - 2]
+            obtained = feat["chg_1"].iloc[i]
+            assert abs(obtained - expected) < 1e-9, (
+                f"chg_1 row {i}: expected {expected}, got {obtained}"
             )
 
 
@@ -243,8 +274,8 @@ class TestTrailingRolling:
         mask = ~(np.isnan(base_vals) & np.isnan(flat_vals))
         assert np.allclose(base_vals[mask], flat_vals[mask], equal_nan=True)
 
-    def test_lag_chg_not_affected_by_future(self):
-        """lag_chg_1 at row i depends only on price[i-1] — independent of price[i+k]."""
+    def test_chg_0_and_chg_1_trailing_in_rolling_context(self):
+        """chg_0 and chg_1 at row i are unaffected by prices at row i+k (k>=1)."""
         prices = [10.0, 11.0, 12.0, 13.0, 14.0]
         df = _make_df(prices)
         feat = build_feature_matrix(df, horizons=[1])
@@ -254,14 +285,15 @@ class TestTrailingRolling:
         df_mod = _make_df(prices_modified)
         feat_mod = build_feature_matrix(df_mod, horizons=[1])
 
-        # rows 0..2 lag_chg_1 must be identical
-        for i in range(3):
-            v1 = feat["lag_chg_1"].iloc[i]
-            v2 = feat_mod["lag_chg_1"].iloc[i]
-            if np.isnan(v1):
-                assert np.isnan(v2)
-            else:
-                assert abs(v1 - v2) < 1e-9
+        # rows 0..2: chg_0 unchanged (row 3 chg_0 = price[3]-price[2], unaffected)
+        for col in ("chg_0", "chg_1"):
+            for i in range(3):
+                v1 = feat[col].iloc[i]
+                v2 = feat_mod[col].iloc[i]
+                if np.isnan(v1):
+                    assert np.isnan(v2)
+                else:
+                    assert abs(v1 - v2) < 1e-9, f"{col} changed at row {i}"
 
 
 # ── Group 5: Excluded columns absent from output ──────────────────────────────

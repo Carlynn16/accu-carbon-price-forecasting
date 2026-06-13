@@ -515,11 +515,15 @@ def build_features_section(
        )
 
     _bold_inline(doc,
-        "Group A — Lag changes (4 features):  ",
-        "lag_chg_1, lag_chg_2, lag_chg_3, lag_chg_5. "
-        "The daily price change lagged by 1, 2, 3, and 5 days. These directly capture "
-        "the lag-1 momentum signal identified in Section 3.3 and provide the model "
-        "with recent directional information."
+        "Group A — Momentum (change family, 5 features):  ",
+        "chg_0, chg_1, chg_2, chg_3, chg_5. "
+        "chg_0 = price(t) − price(t−1): the most-recent realised change, fully "
+        "available at the close of day t and the direct carrier of the lag-1 momentum "
+        "signal (corr ≈ +0.045 with target_1 on the full series; ≈ +0.41 on genuine-move "
+        "days only). chg_1 through chg_5 are further lags. Note: chg_2 shows an "
+        "apparent train correlation of ≈ +0.33 — this is largely the forward-fill "
+        "artefact identified in Section 3.3 (lag-2 ACF of the full change series), "
+        "not a reliable signal; models should not be expected to rely on it out-of-sample."
     )
     _bold_inline(doc,
         "Group B — Staleness features (4 features):  ",

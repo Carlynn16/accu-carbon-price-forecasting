@@ -113,11 +113,14 @@ def build_feature_matrix(
 
     out = pd.DataFrame({DATE_COL: df[DATE_COL]})
 
-    # ── Group A: lag changes ────────────────────────────────────────────────
-    out["lag_chg_1"] = change.shift(1)
-    out["lag_chg_2"] = change.shift(2)
-    out["lag_chg_3"] = change.shift(3)
-    out["lag_chg_5"] = change.shift(5)
+    # ── Group A: momentum (change family) ──────────────────────────────────
+    # chg_0 = s(t) = price(t)-price(t-1): most-recent realised change,
+    # fully available at end of day t. chg_1..chg_5 are prior-day lags.
+    out["chg_0"] = change.shift(0)   # s(t)
+    out["chg_1"] = change.shift(1)   # s(t-1)
+    out["chg_2"] = change.shift(2)   # s(t-2)
+    out["chg_3"] = change.shift(3)   # s(t-3)
+    out["chg_5"] = change.shift(5)   # s(t-5)
 
     # ── Group B: staleness ──────────────────────────────────────────────────
     moved = (change != 0.0).astype(float)
