@@ -1,0 +1,11 @@
+data/**
+!data/
+!data/raw/
+!data/processed/
+!data/**/.gitkeep
+figures/*.png
+venv/
+__pycache__/
+*.pyc
+CONTEXT.md
+*.log

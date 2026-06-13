@@ -1,0 +1,3 @@
+# Australian Carbon Credit Price Forecasting
+
+This repository forecasts the Australian ACCU (Generic) carbon-credit spot price at 1, 7, and 30 days ahead, and evaluates whether any model genuinely beats a random-walk baseline. The data covers daily prices and volumes from the Australian carbon and renewable-certificate market (2018–2024). The central methodological concern is honest forecasting skill: all models are compared against a naive random-walk benchmark, the feature set is audited to exclude target-derived and sibling-reconstruction columns, and evaluation uses held-out chronological test data with walk-forward cross-validation.
