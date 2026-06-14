@@ -166,71 +166,41 @@ def run_tree_models(
 
 # ── SARIMAX ───────────────────────────────────────────────────────────────────
 
-def _sarimax_fit_forecast(train_arr: np.ndarray, n_steps: int) -> np.ndarray:
-    """
-    Fit SARIMAX(1,1,1) on train_arr; return forecast array of length n_steps.
-    Falls back to zeros on convergence failure.
-    """
+def _sarimax_fit(train_arr: np.ndarray):
+    """Fit SARIMAX(1,1,1) on train_arr; return result or None on failure."""
     from statsmodels.tsa.statespace.sarimax import SARIMAX
-
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            result = SARIMAX(
+            return SARIMAX(
                 train_arr,
                 order=(1, 1, 1),
                 trend="n",
                 enforce_stationarity=False,
                 enforce_invertibility=False,
             ).fit(disp=False)
-            fc = np.asarray(result.forecast(n_steps), dtype=float)
     except Exception:
-        fc = np.zeros(n_steps, dtype=float)
-
-    return fc
-
-
-def _apply_sarimax_forecast(
-    fc:          np.ndarray,
-    n_base:      int,
-    date_to_pos: dict,
-    feat_df:     pd.DataFrame,
-    h:           int,
-) -> tuple[np.ndarray, dict]:
-    """
-    Convert a pre-computed SARIMAX forecast array into predicted changes for
-    all valid rows of feat_df at horizon h.
-
-    fc[k] = predicted level for position (n_base + k) in the full price array.
-    predicted_change_h(t) = fc[(pos(t) - n_base) + h] - price_anchor(t)
-    """
-    data  = prepare_horizon(feat_df, h)
-    dates = pd.to_datetime(data["dates"])
-
-    preds = np.empty(len(dates), dtype=float)
-    for i, (d, p) in enumerate(zip(dates, data["price_anchor"])):
-        pos = date_to_pos.get(d)
-        if pos is None:
-            preds[i] = 0.0
-            continue
-        idx = (pos - n_base) + h
-        preds[i] = float(fc[idx]) - p if 0 <= idx < len(fc) else 0.0
-
-    return preds, data
+        return None
 
 
 def run_sarimax(
     feat_val:    pd.DataFrame,
     feat_test:   pd.DataFrame,
-    full_price:  pd.Series,           # Date-indexed, covers train+val+test
+    full_price:  pd.Series,
     horizons:    Sequence[int] = (1, 7, 30),
     baseline_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
-    SARIMAX(1,1,1) univariate benchmark.
-      Val:  fit on train price only.
-      Test: refit on train+val price.
-    Two SARIMAX fits total (one per split); all horizons share each fit.
+    SARIMAX(1,1,1) univariate benchmark with rolling h-step-ahead forecasts.
+
+    At each evaluation origin t the h-step predicted level is:
+        E[y_{t+h} | y_0..y_t] = Z @ T^h @ alpha_{t|t}
+    where alpha_{t|t} is the Kalman filtered state after observing y_t.
+    One apply() call per split runs the Kalman filter in O(N); no rolling refit.
+    ARIMA(0,1,0) through this harness gives skill = 0% exactly (verified).
+
+    Val:  parameters fit on train; Kalman pass over train+val.
+    Test: parameters refit on train+val; Kalman pass over full series.
     """
     all_dates    = pd.to_datetime(full_price.index)
     date_to_pos  = {d: i for i, d in enumerate(all_dates)}
@@ -240,31 +210,52 @@ def run_sarimax(
     test_first   = pd.to_datetime(feat_test["Date"].iloc[0])
     n_train      = date_to_pos[val_first]
     n_trainval   = date_to_pos[test_first]
-    h_max        = max(horizons)
 
-    # ── Fit 1: train only (for val) ───────────────────────────────────────────
     print("  SARIMAX: fitting on train ...")
-    n_fc_val = len(full_arr) - n_train + h_max + 5
-    fc_val   = _sarimax_fit_forecast(full_arr[:n_train], n_fc_val)
-
-    # ── Fit 2: train+val (for test) ───────────────────────────────────────────
+    result_val  = _sarimax_fit(full_arr[:n_train])
     print("  SARIMAX: refitting on train+val ...")
-    n_fc_te = len(full_arr) - n_trainval + h_max + 5
-    fc_te   = _sarimax_fit_forecast(full_arr[:n_trainval], n_fc_te)
+    result_test = _sarimax_fit(full_arr[:n_trainval])
 
     records: list[dict] = []
-    for h in horizons:
-        for split, feat_df, fc, n_base in [
-            ("val",  feat_val,  fc_val, n_train),
-            ("test", feat_test, fc_te,  n_trainval),
-        ]:
-            rw_rmse, rw_mae = _lookup_rw(baseline_df, h, split)
-            preds, data = _apply_sarimax_forecast(fc, n_base, date_to_pos, feat_df, h)
+
+    for split_name, feat_df, result, n_apply_end in [
+        ("val",  feat_val,  result_val,  n_trainval),
+        ("test", feat_test, result_test, len(full_arr)),
+    ]:
+        # One Kalman filter pass per split
+        if result is not None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                fr = result.apply(full_arr[:n_apply_end]).filter_results
+            T    = fr.transition[:, :, 0]
+            Z    = fr.design[0, :, 0]
+            ZTh  = {h: Z @ np.linalg.matrix_power(T, h) for h in horizons}
+            filt = fr.filtered_state          # (state_dim, n_apply_end)
+        else:
+            fr = None
+
+        for h in horizons:
+            rw_rmse, rw_mae = _lookup_rw(baseline_df, h, split_name)
+            data  = prepare_horizon(feat_df, h)
+            dates = np.array(data["dates"])
+
+            if fr is not None:
+                ZTh_h = ZTh[h]
+                preds = np.empty(len(dates), dtype=float)
+                for i, (d, anch) in enumerate(zip(dates, data["price_anchor"])):
+                    pos = date_to_pos.get(pd.Timestamp(d))
+                    if pos is None or pos >= n_apply_end:
+                        preds[i] = 0.0
+                    else:
+                        preds[i] = float(ZTh_h @ filt[:, pos]) - float(anch)
+            else:
+                preds = np.zeros(len(dates), dtype=float)
+
             m = compute_metrics(
                 preds, data["y"], data["price_anchor"],
                 rw_rmse=rw_rmse, rw_mae=rw_mae,
             )
-            records.append({"model": "sarimax", "horizon": h, "split": split, **m})
+            records.append({"model": "sarimax", "horizon": h, "split": split_name, **m})
 
     return build_results_table(records)
 
