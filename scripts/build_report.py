@@ -26,18 +26,21 @@ from src.eda import (
     plot_momentum,
     plot_price_timeline,
     plot_returns,
+    plot_skill_by_horizon,
     plot_staleness,
     plot_target_distributions,
     plot_volatility,
 )
 from src.evaluate import build_results_table, compute_metrics, prepare_horizon
 from src.features import build_features, save_features
+from src.models import run_all_models
 from src.report import (
     build_baselines_section,
     build_data_section,
     build_eda_section,
     build_features_section,
     build_intro,
+    build_modeling_section,
 )
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -98,6 +101,23 @@ def _compute_baselines(
     return build_results_table(records)
 
 
+def _compute_models(
+    feat_train: pd.DataFrame,
+    feat_val:   pd.DataFrame,
+    feat_test:  pd.DataFrame,
+    full_price: pd.Series,
+    baseline_df: pd.DataFrame,
+    horizons: tuple[int, ...] = (1, 7, 30),
+) -> pd.DataFrame:
+    """Run tree models + SARIMAX; return tidy results DataFrame (without baselines)."""
+    from src.evaluate import build_results_table
+    model_df = run_all_models(
+        feat_train, feat_val, feat_test, full_price,
+        horizons=horizons, baseline_df=baseline_df,
+    )
+    return model_df
+
+
 def main() -> None:
     print("Loading cleaned splits...")
     train = pd.read_parquet(PROCESSED / "train.parquet")
@@ -139,8 +159,17 @@ def main() -> None:
     baseline_df = _compute_baselines(feat_val, feat_test, full_price)
     print(baseline_df.to_string(index=False))
 
+    print("Running ML models (RF, XGB, LGBM, SARIMAX)...")
+    model_df = _compute_models(feat_train, feat_val, feat_test, full_price, baseline_df)
+    from src.evaluate import build_results_table as _brt
+    consolidated_df = _brt(
+        pd.concat([baseline_df, model_df], ignore_index=True).to_dict("records")
+    )
+    print(consolidated_df.to_string(index=False))
+
     print("Generating figures...")
     _ensure_figures(train, val, test, feat_train, stale_stats)
+    plot_skill_by_horizon(consolidated_df, FIGURES / "fig_skill_by_horizon.png")
 
     print("Computing stationarity statistics (train)...")
     stats = compute_stationarity_tests(train)
@@ -168,7 +197,7 @@ def main() -> None:
         "3. Exploratory Analysis",
         "4. Feature Engineering",
         "5. Baselines and Evaluation Framework",
-        "[6. ML/DL Models — to be added in Block C2]",
+        "6. Modelling Results (RF, XGB, LGBM, SARIMAX)",
         "[7. Explainability — to be added in Block E]",
     ]:
         doc.add_paragraph(line)
@@ -188,6 +217,9 @@ def main() -> None:
     doc.add_page_break()
 
     build_baselines_section(doc, baseline_df=baseline_df)
+    doc.add_page_break()
+
+    build_modeling_section(doc, figures_dir=FIGURES, consolidated_df=consolidated_df)
 
     # ── Save docx ───────────────────────────────────────────────────────────
     doc.save(DOCX_OUT)

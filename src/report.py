@@ -10,6 +10,7 @@ Sections:
   build_eda_section(doc, figures_dir, stats, stale_stats)
   build_features_section(doc, figures_dir, feat_stats)
   build_baselines_section(doc, baseline_df)
+  build_modeling_section(doc, figures_dir, consolidated_df)
 """
 
 from pathlib import Path
@@ -720,3 +721,182 @@ def build_baselines_section(
         para = doc.add_paragraph()
         run  = para.add_run("[Baseline results table — to be inserted after running baselines]")
         run.font.color.rgb = RGBColor(0xC0, 0x39, 0x2B)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 6 — Modelling Results
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_modeling_section(
+    doc: Document,
+    figures_dir: Path,
+    consolidated_df: "pd.DataFrame | None" = None,
+) -> None:
+    """Write Section 6: ML model results (RF, XGB, LGBM, SARIMAX)."""
+    import pandas as pd  # local import
+
+    _h(doc, "6. Modelling Results")
+
+    _p(doc,
+       "This section reports the forecasting performance of tree-based ML models "
+       "(Random Forest, XGBoost, LightGBM) and a univariate SARIMAX benchmark, "
+       "evaluated at horizons h = 1, 7, and 30 days."
+       )
+
+    # ── 6.1 Walk-Forward Validation Protocol ─────────────────────────────────
+    _h(doc, "6.1  Walk-Forward Validation Protocol", level=2)
+
+    _p(doc,
+       "All ML models were tuned using scikit-learn's TimeSeriesSplit with "
+       "n_splits = 5 expanding-window folds applied exclusively to the training set. "
+       "For each model and horizon the following three-phase protocol was followed:"
+       )
+
+    _bullet(doc,
+            "Phase 1 — Tune:  GridSearchCV over a predefined hyperparameter grid, "
+            "using TimeSeriesSplit(n_splits=5) as the inner cross-validator and "
+            "RMSE as the scoring metric. The search space is kept deliberately small "
+            "(4–8 candidate configurations) to limit computational cost while still "
+            "exploring the most impactful dimensions (tree depth, learning rate, "
+            "number of estimators).")
+    _bullet(doc,
+            "Phase 2 — Val evaluation:  The best estimator from Phase 1 (refit on "
+            "the full training set with the winning hyperparameters) is used to "
+            "generate predictions for the validation set. No validation data is "
+            "seen during Phase 1.")
+    _bullet(doc,
+            "Phase 3 — Test evaluation:  The best estimator is refit from scratch "
+            "on the combined training + validation set (with the same hyperparameters "
+            "selected in Phase 1) and used to predict the held-out test set exactly once.")
+
+    _p(doc,
+       "Why random k-fold is wrong for time-series data: standard k-fold "
+       "cross-validation creates folds by random permutation, so validation examples "
+       "from the past are used to assess models trained on the future. This constitutes "
+       "look-ahead bias — the hyperparameters selected will appear to generalise "
+       "well in-sample but will systematically over-estimate performance on any "
+       "future deployment horizon. TimeSeriesSplit enforces strict temporal ordering: "
+       "every training fold ends strictly before the corresponding validation fold begins, "
+       "replicating the genuine deployment condition."
+       )
+
+    # ── 6.2 Model Descriptions ───────────────────────────────────────────────
+    _h(doc, "6.2  Model Descriptions", level=2)
+
+    _bold_inline(doc, "Random Forest:  ",
+        "Ensemble of decision trees with bootstrap sampling (n_estimators ∈ {100, 300}, "
+        "max_depth ∈ {5, unlimited}, min_samples_leaf ∈ {5, 10}). Captures non-linear "
+        "interactions between momentum and staleness features.")
+    _bold_inline(doc, "XGBoost:  ",
+        "Gradient-boosted trees with histogram split finding, L1/L2 regularisation "
+        "(n_estimators ∈ {100, 200}, max_depth ∈ {3, 5}, learning_rate ∈ {0.05, 0.1}). "
+        "Strong baseline for tabular regression.")
+    _bold_inline(doc, "LightGBM:  ",
+        "Leaf-wise gradient boosted trees (n_estimators ∈ {100, 200}, "
+        "num_leaves ∈ {31, 63}, learning_rate ∈ {0.05, 0.1}). "
+        "Faster training and often comparable or superior accuracy to XGBoost.")
+    _bold_inline(doc, "SARIMAX(1,1,1):  ",
+        "Classical univariate benchmark on the price level with first differencing (d=1). "
+        "Fit on the training price series to predict the validation set; refit on "
+        "training + validation to predict the test set. Captures linear AR and MA "
+        "structure but ignores all exogenous features.")
+
+    # ── 6.3 Consolidated Results ─────────────────────────────────────────────
+    _h(doc, "6.3  Consolidated Results", level=2)
+
+    _p(doc,
+       "Table 2 shows RMSE and RMSE skill score (relative to the random walk) for all "
+       "models on the validation and test sets across the three forecast horizons. "
+       "The random-walk skill score is 0% by definition. Positive values indicate "
+       "improvement over the random walk; negative values indicate degradation."
+       )
+
+    if consolidated_df is not None and len(consolidated_df) > 0:
+        _p(doc, "")
+
+        # Build a compact pivot: rows = (model, horizon), cols = val/test metrics
+        rows_display = []
+        for (model, horizon), grp in consolidated_df.groupby(["model", "horizon"]):
+            row = {
+                "Model":   model.replace("_", " ").replace("random walk", "Random Walk").title(),
+                "h (days)": int(horizon),
+            }
+            for _, r in grp.iterrows():
+                sp = r["split"]
+                row[f"{sp} RMSE"]     = f"{r['RMSE']:.4f}"
+                row[f"{sp} skill (%)"] = f"{r['RMSE_skill_%']:.2f}"
+            rows_display.append(row)
+
+        disp_df = pd.DataFrame(rows_display)
+
+        table = doc.add_table(rows=len(disp_df) + 1, cols=len(disp_df.columns))
+        table.style = "Table Grid"
+        hdr_cells = table.rows[0].cells
+        for j, col in enumerate(disp_df.columns):
+            hdr_cells[j].text = str(col)
+            run = hdr_cells[j].paragraphs[0].runs
+            if run:
+                run[0].bold = True
+        for i, (_, row_vals) in enumerate(disp_df.iterrows()):
+            data_cells = table.rows[i + 1].cells
+            for j, val in enumerate(row_vals):
+                data_cells[j].text = str(val)
+
+        cap = doc.add_paragraph()
+        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = cap.add_run(
+            "Table 2.  Consolidated RMSE and skill score (vs random walk) for all models "
+            "and baselines on validation and test sets. Skill > 0 means better than random walk."
+        )
+        run.italic = True
+        run.font.size = Pt(9)
+    else:
+        para = doc.add_paragraph()
+        run  = para.add_run(
+            "[Model results table — run scripts/run_models.py and regenerate report]"
+        )
+        run.font.color.rgb = RGBColor(0xC0, 0x39, 0x2B)
+
+    # ── 6.4 Skill by Horizon ─────────────────────────────────────────────────
+    _h(doc, "6.4  Skill Score by Horizon", level=2)
+
+    skill_fig = figures_dir / "fig_skill_by_horizon.png"
+    _figure(
+        doc,
+        skill_fig,
+        "Figure 9.  RMSE skill score (%) vs random walk by model and horizon. "
+        "Left: validation set. Right: test set. Bars above zero indicate improvement "
+        "over the random-walk benchmark. Error bars omitted (single evaluation per split).",
+    )
+
+    # ── 6.5 Interpretation ───────────────────────────────────────────────────
+    _h(doc, "6.5  Interpretation", level=2)
+
+    _p(doc,
+       "The results should be interpreted with awareness of the market's structural "
+       "characteristics established in earlier sections:"
+       )
+
+    _bullet(doc,
+            "The test set occupies a low-volatility regime (Section 3.4). Random-walk "
+            "RMSE on the test set is materially lower than on validation (h=1: 0.32 vs 0.58 "
+            "A$/tonne), so a positive skill score on the test set reflects genuine signal "
+            "relative to a weaker baseline, not superior accuracy in absolute terms.")
+    _bullet(doc,
+            "Market staleness (75.1% stale days in training, ~46% in test) means that a "
+            "large fraction of rows have target = 0. Any model that predicts near-zero "
+            "changes will achieve a low RMSE simply by being right on stale days; "
+            "the directional accuracy metric (Table 1) is more diagnostic for genuine "
+            "price-discovery days.")
+    _bullet(doc,
+            "The 25-feature matrix was designed to capture momentum (chg_0 as the "
+            "lag-1 carrier), staleness structure, and volatility regime. If tree models "
+            "achieve modest positive skill, this is the expected source. Negative skill "
+            "at longer horizons (h=30) would be unsurprising: the 30-day-ahead change "
+            "distribution is much wider and the mean-reversion implied by the "
+            "random-walk null is genuinely hard to beat.")
+    _bullet(doc,
+            "SARIMAX serves as a sanity check. Because the price change series has "
+            "minimal linear autocorrelation (Section 3.3) and the model ignores all "
+            "exogenous features, it is expected to perform close to or worse than the "
+            "random walk at most horizons.")

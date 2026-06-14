@@ -535,6 +535,87 @@ def plot_feature_target_corr(
     return outpath
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 9 — Skill by horizon (C2 models)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_skill_by_horizon(
+    consolidated_df: "pd.DataFrame",
+    outpath: Path,
+    skip_models: tuple = ("random_walk", "drift"),
+) -> Path:
+    """
+    Grouped bar chart of RMSE skill % per model, split into val (left) and test (right).
+    Each group of bars represents one horizon; colours represent models.
+    Models in skip_models are excluded (RW skill = 0 by definition; drift is shown separately).
+    """
+    _set_style()
+
+    df = consolidated_df[~consolidated_df["model"].isin(skip_models)].copy()
+    if df.empty:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.text(0.5, 0.5, "No model data available", ha="center", va="center")
+        fig.savefig(outpath, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return outpath
+
+    models   = sorted(df["model"].unique())
+    horizons = sorted(df["horizon"].unique())
+    n_models = len(models)
+    n_h      = len(horizons)
+
+    cmap   = plt.get_cmap("tab10")
+    colors = {m: cmap(i) for i, m in enumerate(models)}
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+    x = np.arange(n_h)
+    width = 0.8 / max(n_models, 1)
+
+    for ax_idx, split in enumerate(["val", "test"]):
+        ax  = axes[ax_idx]
+        sub = df[df["split"] == split]
+
+        for i, model in enumerate(models):
+            m_sub  = sub[sub["model"] == model]
+            skills = []
+            for h in horizons:
+                row = m_sub[m_sub["horizon"] == h]
+                skills.append(float(row["RMSE_skill_%"].iloc[0]) if not row.empty else float("nan"))
+
+            offset = (i - n_models / 2 + 0.5) * width
+            bars = ax.bar(x + offset, skills, width * 0.92,
+                          label=model.replace("_", " "),
+                          color=colors[model], alpha=0.85, edgecolor="white")
+
+            for bar, skill in zip(bars, skills):
+                if not np.isnan(skill):
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + (0.5 if skill >= 0 else -1.5),
+                        f"{skill:.1f}",
+                        ha="center", va="bottom" if skill >= 0 else "top",
+                        fontsize=7.5,
+                    )
+
+        ax.axhline(0, color="black", linewidth=0.9)
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"h = {h}" for h in horizons])
+        ax.set_title(f"{split.capitalize()} set", fontsize=12)
+        ax.set_xlabel("Forecast horizon (days)")
+
+    axes[0].set_ylabel("RMSE Skill Score (%) vs Random Walk")
+    axes[0].legend(fontsize=9, loc="upper right")
+    fig.suptitle(
+        "Model RMSE Skill Score vs Random Walk by Horizon\n"
+        "(positive = better than random walk)",
+        fontsize=13,
+    )
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
 def print_stats_summary(stats: dict) -> None:
     """Print a formatted summary of all stationarity test results."""
     sep = "=" * 65

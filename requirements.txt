@@ -3,6 +3,8 @@ numpy
 scipy
 statsmodels
 scikit-learn
+xgboost
+lightgbm
 matplotlib
 seaborn
 pyarrow
