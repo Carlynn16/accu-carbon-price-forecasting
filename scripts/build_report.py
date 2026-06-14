@@ -17,6 +17,7 @@ import pandas as pd
 from docx import Document
 from docx.shared import Pt
 
+from src.baselines import drift_predict, random_walk_predict
 from src.eda import (
     compute_stationarity_tests,
     compute_staleness_stats,
@@ -29,8 +30,10 @@ from src.eda import (
     plot_target_distributions,
     plot_volatility,
 )
+from src.evaluate import build_results_table, compute_metrics, prepare_horizon
 from src.features import build_features, save_features
 from src.report import (
+    build_baselines_section,
     build_data_section,
     build_eda_section,
     build_features_section,
@@ -38,11 +41,12 @@ from src.report import (
 )
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-REPO      = Path(__file__).parent.parent
-PROCESSED = REPO / "data" / "processed"
-FIGURES   = REPO / "figures"
-DOCX_OUT  = REPO / "Statistical_Report.docx"
-PDF_OUT   = REPO / "Statistical_Report.pdf"
+REPO       = Path(__file__).parent.parent
+PROCESSED  = REPO / "data" / "processed"
+FIGURES    = REPO / "figures"
+DOCX_OUT   = REPO / "Statistical_Report.docx"
+PDF_OUT    = REPO / "Statistical_Report.pdf"
+TARGET_COL = "ACCU spot price (Generic)"
 
 
 def _ensure_figures(
@@ -66,6 +70,34 @@ def _ensure_figures(
     )
 
 
+def _compute_baselines(
+    feat_val:   pd.DataFrame,
+    feat_test:  pd.DataFrame,
+    full_price: pd.Series,
+    horizons:   tuple[int, ...] = (1, 7, 30),
+) -> pd.DataFrame:
+    """Run random-walk and drift baselines; return tidy results DataFrame."""
+    records = []
+    for h in horizons:
+        for split_name, feat_df in [("val", feat_val), ("test", feat_test)]:
+            data = prepare_horizon(feat_df, h)
+
+            rw_pred    = random_walk_predict(data["n_rows"])
+            rw_metrics = compute_metrics(rw_pred, data["y"], data["price_anchor"])
+            rw_rmse    = rw_metrics["RMSE"]
+            rw_mae     = rw_metrics["MAE"]
+            rw_metrics.update({"RMSE_skill_%": 0.0, "MAE_skill_%": 0.0})
+            records.append({"model": "random_walk", "horizon": h, "split": split_name,
+                             **rw_metrics})
+
+            d_pred    = drift_predict(data["dates"], full_price, h)
+            d_metrics = compute_metrics(d_pred, data["y"], data["price_anchor"],
+                                        rw_rmse=rw_rmse, rw_mae=rw_mae)
+            records.append({"model": "drift", "horizon": h, "split": split_name,
+                             **d_metrics})
+    return build_results_table(records)
+
+
 def main() -> None:
     print("Loading cleaned splits...")
     train = pd.read_parquet(PROCESSED / "train.parquet")
@@ -79,8 +111,9 @@ def main() -> None:
     print(f"  feat_val:   {feat_val.shape}")
     print(f"  feat_test:  {feat_test.shape}")
 
-    feat_cols = [c for c in feat_train.columns
-                 if c not in ("Date", "target_1", "target_7", "target_30")]
+    # Feature count excludes metadata and target columns
+    from src.evaluate import META_COLS
+    feat_cols = [c for c in feat_train.columns if c not in META_COLS]
     feat_stats = {
         "n_features": len(feat_cols),
         "shapes": {
@@ -96,6 +129,15 @@ def main() -> None:
         s = stale_stats[split_name]
         print(f"  {split_name:5s}: {s['pct_zero']:.1f}% zero-change  "
               f"({s['n_nonzero']} move-days)  max_run={s['max_run']}")
+
+    print("Computing baselines...")
+    full_price = (
+        pd.concat([train, val, test])
+        .sort_values("Date")
+        .set_index("Date")[TARGET_COL]
+    )
+    baseline_df = _compute_baselines(feat_val, feat_test, full_price)
+    print(baseline_df.to_string(index=False))
 
     print("Generating figures...")
     _ensure_figures(train, val, test, feat_train, stale_stats)
@@ -125,8 +167,8 @@ def main() -> None:
         "2. Data and Cleaning",
         "3. Exploratory Analysis",
         "4. Feature Engineering",
-        "[5. Modelling — to be added in Block C]",
-        "[6. Evaluation — to be added in Block D]",
+        "5. Baselines and Evaluation Framework",
+        "[6. ML/DL Models — to be added in Block C2]",
         "[7. Explainability — to be added in Block E]",
     ]:
         doc.add_paragraph(line)
@@ -143,6 +185,9 @@ def main() -> None:
     doc.add_page_break()
 
     build_features_section(doc, figures_dir=FIGURES, feat_stats=feat_stats)
+    doc.add_page_break()
+
+    build_baselines_section(doc, baseline_df=baseline_df)
 
     # ── Save docx ───────────────────────────────────────────────────────────
     doc.save(DOCX_OUT)

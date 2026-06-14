@@ -112,6 +112,7 @@ def build_feature_matrix(
     change = price.diff()                     # daily change; row 0 = NaN
 
     out = pd.DataFrame({DATE_COL: df[DATE_COL]})
+    out["price_anchor"] = price.values   # level at time t; eval metadata, NOT a feature / NOT in X
 
     # ── Group A: momentum (change family) ──────────────────────────────────
     # chg_0 = s(t) = price(t)-price(t-1): most-recent realised change,

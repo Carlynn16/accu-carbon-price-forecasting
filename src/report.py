@@ -4,14 +4,12 @@ Incremental report builder.
 Each public function writes one section into the provided python-docx Document.
 Call them in order from scripts/build_report.py.
 
-Sections implemented here (Block A-bis):
+Sections:
   build_intro(doc, figures_dir, stats)
   build_data_section(doc, figures_dir, stats)
-  build_eda_section(doc, figures_dir, stats)
-
-Later blocks will add:
-  build_features_section, build_modeling_section,
-  build_evaluation_section, build_explainability_section.
+  build_eda_section(doc, figures_dir, stats, stale_stats)
+  build_features_section(doc, figures_dir, feat_stats)
+  build_baselines_section(doc, baseline_df)
 """
 
 from pathlib import Path
@@ -572,3 +570,153 @@ def build_features_section(
         "features; negative (blue) bars indicate mean-reverting signals. The staleness "
         "and lag features dominate the top rankings.",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 5 — Baselines and Evaluation Framework
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_baselines_section(
+    doc: Document,
+    baseline_df: "pd.DataFrame | None" = None,
+) -> None:
+    """Write Section 5: Baselines and Evaluation Framework."""
+    import pandas as pd  # local import — report.py has no top-level pandas dependency
+
+    _h(doc, "5. Baselines and Evaluation Framework")
+
+    _p(doc,
+       "This section defines the evaluation framework used throughout the study and "
+       "establishes the baseline forecasts against which every subsequent model is judged."
+       )
+
+    # ── 5.1 The Random-Walk Benchmark ────────────────────────────────────────
+    _h(doc, "5.1  The Random-Walk Benchmark", level=2)
+
+    _p(doc,
+       "The primary benchmark is the random-walk (RW) forecast: at time t, the "
+       "predicted h-day-ahead price is simply price(t). Equivalently, the predicted "
+       "h-step change is zero. This is the correct null hypothesis for any I(1) series "
+       "and, in illiquid markets such as the ACCU spot market, it is empirically "
+       "difficult to beat even with sophisticated methods."
+       )
+
+    _p(doc,
+       "A secondary, slightly more informed reference is the drift forecast: the "
+       "predicted h-step change equals h times the trailing 30-day mean daily change. "
+       "This allows for a persistent trend in the recent past without any exogenous "
+       "information. Seasonal-naive forecasting is omitted: the ACCU spot market shows "
+       "no stable calendar seasonality — price dynamics are policy-driven and dominated "
+       "by the staleness structure documented in Section 3.2."
+       )
+
+    # ── 5.2 Metrics ──────────────────────────────────────────────────────────
+    _h(doc, "5.2  Evaluation Metrics", level=2)
+
+    _p(doc,
+       "For all models and baselines, predictions are expressed as h-step price changes. "
+       "To evaluate, the predicted level is reconstructed as price_anchor + predicted_change, "
+       "where price_anchor = price(t). Metrics are computed on the reconstructed level:"
+       )
+
+    _bullet(doc,
+            "RMSE and MAE (A$/tonne). Note: because the anchor cancels in the residual, "
+            "RMSE on the reconstructed level is identical to RMSE on the raw change — "
+            "both are reported in units of A$/tonne and are directly interpretable."
+            )
+    _bullet(doc,
+            "MAPE (%) on the reconstructed level. This is low for short horizons because "
+            "most calendar days are stale (zero change, so pred = actual)."
+            )
+    _bullet(doc,
+            "Directional accuracy (%): the fraction of rows where the predicted "
+            "sign of the change matches the actual sign. Computed exclusively on "
+            "genuine-move rows (actual change ≠ 0), since direction is "
+            "meaningless for stale days where both prediction and actuality are zero."
+            )
+
+    _p(doc,
+       "The headline metric is the skill score:"
+       )
+
+    para = doc.add_paragraph()
+    run  = para.add_run(
+        "RMSE skill score = 100 × (1 − RMSE_model / RMSE_random_walk)   [%]"
+    )
+    run.italic = True
+    para.paragraph_format.left_indent = Inches(0.5)
+
+    _p(doc,
+       "A positive skill score means the model beats the random walk. A negative "
+       "skill score means it is worse. Zero means tied. The same formula is applied "
+       "to MAE. The skill score is the only metric reported in the executive summary."
+       )
+
+    # ── 5.3 Walk-Forward CV (deferred) ───────────────────────────────────────
+    _h(doc, "5.3  Walk-Forward Cross-Validation", level=2)
+
+    _p(doc,
+       "All ML/DL models in subsequent sections will be tuned using walk-forward "
+       "(rolling-origin) cross-validation on the training set, implemented via "
+       "scikit-learn's TimeSeriesSplit. Standard k-fold cross-validation is never used: "
+       "it would validate on the past using folds from the future, producing optimistic "
+       "hyperparameter estimates that do not generalise to the deployment horizon. "
+       "This section reports only the two baselines, which require no tuning."
+       )
+
+    # ── 5.4 Baseline Results ─────────────────────────────────────────────────
+    _h(doc, "5.4  Baseline Performance", level=2)
+
+    _p(doc,
+       "Table 1 reports RMSE, MAE, MAPE, and directional accuracy for the random-walk "
+       "and drift baselines on the validation and test sets. Skill scores for the drift "
+       "are relative to the random walk. By construction, the random-walk skill score "
+       "is 0% for every horizon."
+       )
+
+    if baseline_df is not None and len(baseline_df) > 0:
+        # ── format a compact table: pivot split into column groups ─────────
+        _p(doc, "")  # spacer
+
+        # Build display table
+        rows_display = []
+        for (model, horizon), grp in baseline_df.groupby(["model", "horizon"]):
+            row = {"Model": model.replace("_", " ").title(), "h": horizon}
+            for _, r in grp.iterrows():
+                sp = r["split"]
+                row[f"{sp} RMSE"]        = f"{r['RMSE']:.4f}"
+                row[f"{sp} MAE"]         = f"{r['MAE']:.4f}"
+                row[f"{sp} MAPE_%"]      = f"{r['MAPE_%']:.2f}"
+                row[f"{sp} dir_acc_%"]   = f"{r['dir_acc_%']:.1f}"
+                row[f"{sp} RMSE_skill%"] = f"{r['RMSE_skill_%']:.2f}"
+            rows_display.append(row)
+
+        disp_df = pd.DataFrame(rows_display)
+
+        # ── python-docx table ─────────────────────────────────────────────
+        table = doc.add_table(rows=len(disp_df) + 1, cols=len(disp_df.columns))
+        table.style = "Table Grid"
+        hdr_cells = table.rows[0].cells
+        for j, col in enumerate(disp_df.columns):
+            hdr_cells[j].text = str(col)
+            run = hdr_cells[j].paragraphs[0].runs
+            if run:
+                run[0].bold = True
+        for i, (_, row_vals) in enumerate(disp_df.iterrows()):
+            data_cells = table.rows[i + 1].cells
+            for j, val in enumerate(row_vals):
+                data_cells[j].text = str(val)
+
+        cap = doc.add_paragraph()
+        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = cap.add_run(
+            "Table 1.  Baseline performance on validation and test sets. "
+            "RMSE and MAE in A\\$/tonne. MAPE and dir_acc in %. "
+            "Skill scores relative to the random-walk baseline (positive = better)."
+        )
+        run.italic = True
+        run.font.size = Pt(9)
+    else:
+        para = doc.add_paragraph()
+        run  = para.add_run("[Baseline results table — to be inserted after running baselines]")
+        run.font.color.rgb = RGBColor(0xC0, 0x39, 0x2B)
