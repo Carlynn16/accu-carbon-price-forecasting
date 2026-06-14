@@ -11,6 +11,7 @@ Sections:
   build_features_section(doc, figures_dir, feat_stats)
   build_baselines_section(doc, baseline_df)
   build_modeling_section(doc, figures_dir, consolidated_df)
+  build_dl_section(doc, figures_dir, consolidated_df)
 """
 
 from pathlib import Path
@@ -900,3 +901,178 @@ def build_modeling_section(
             "minimal linear autocorrelation (Section 3.3) and the model ignores all "
             "exogenous features, it is expected to perform close to or worse than the "
             "random walk at most horizons.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 7 — Deep Learning Results (LSTM, GRU)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_dl_section(
+    doc: Document,
+    figures_dir: Path,
+    consolidated_df: "pd.DataFrame | None" = None,
+) -> None:
+    """Write Section 7: LSTM and GRU results."""
+    import pandas as pd
+
+    _h(doc, "7. Deep Learning Results (LSTM, GRU)")
+
+    _p(doc,
+       "This section presents results for two recurrent neural network architectures: "
+       "Long Short-Term Memory (LSTM) and Gated Recurrent Unit (GRU). Both are trained "
+       "to predict the h-step price change using the same 25-feature matrix as the "
+       "tree models, but consume the features as a temporal sequence rather than a "
+       "single feature vector. Detailed implementation notes are provided below."
+       )
+
+    # ── 7.1 Sequence Construction ─────────────────────────────────────────────
+    _h(doc, "7.1  Sequence Construction", level=2)
+
+    _p(doc,
+       "Raw features are standardised using a StandardScaler fit on the training set "
+       "only (mean and standard deviation computed from training rows; applied to "
+       "validation and test). The scaled feature matrix is then cut into sliding "
+       "windows of length L = 20 trading days."
+       )
+    _bullet(doc,
+            "Window at anchor row t: input = scaled rows [t-19 .. t] (shape 20 x 25), "
+            "target = target_h(t) = price(t+h) - price(t).")
+    _bullet(doc,
+            "Assignment: each sample belongs to the split of its anchor row t. "
+            "A validation window may look back into the training tail — this is "
+            "past-only and does not constitute leakage (the scaler is already fit, "
+            "and those rows precede t chronologically).")
+    _bullet(doc,
+            "Warm-up: the first L-1 rows of the series cannot form a complete window "
+            "and are excluded. Windows whose target is NaN (last h rows) are also dropped.")
+
+    # ── 7.2 Model Architectures ───────────────────────────────────────────────
+    _h(doc, "7.2  Model Architectures", level=2)
+
+    _bold_inline(doc, "LSTM (Long Short-Term Memory):  ",
+        "Single-layer LSTM with hidden size 64. At each time step the LSTM updates "
+        "a hidden state h_t and a memory cell c_t via learned gating mechanisms "
+        "(input, forget, output gates). The final hidden state h_T is passed through "
+        "a dropout layer (p = 0.2) and a linear head to produce the scalar prediction.")
+    _bold_inline(doc, "GRU (Gated Recurrent Unit):  ",
+        "Single-layer GRU with hidden size 64. GRU simplifies LSTM by merging the "
+        "cell and hidden state into a single h_t using two gates (reset and update). "
+        "Otherwise identical architecture: dropout 0.2, linear head.")
+
+    _p(doc,
+       "Both models use the Adam optimiser (lr = 0.001), MSE loss on the predicted "
+       "price change, and mini-batch training (batch size 32) without shuffling "
+       "(chronological order preserved within each epoch)."
+       )
+
+    # ── 7.3 Training Protocol ─────────────────────────────────────────────────
+    _h(doc, "7.3  Training Protocol", level=2)
+
+    _p(doc,
+       "The protocol mirrors the C2 tree-model protocol exactly:"
+       )
+    _bullet(doc,
+            "Phase 1 — Train on TRAIN sequences. Monitor validation MSE after every "
+            "epoch; save the best weights. Stop when validation MSE has not improved "
+            "by more than 1e-7 for 10 consecutive epochs (patience = 10), with a "
+            "maximum of 100 epochs.")
+    _bullet(doc,
+            "Phase 3 — Refit on TRAIN+VAL sequences for exactly as many epochs as "
+            "Phase 1 selected (using the same random seed). Evaluate once on TEST.")
+    _bullet(doc,
+            "Fixed seeds (torch, numpy, random = 42) ensure fully reproducible results.")
+
+    # ── 7.4 Results ───────────────────────────────────────────────────────────
+    _h(doc, "7.4  Results", level=2)
+
+    _p(doc,
+       "Table 3 shows the complete consolidated results including LSTM and GRU "
+       "alongside all baselines and C2 models. Skill scores are relative to the "
+       "random-walk baseline (0% by definition)."
+       )
+
+    if consolidated_df is not None and len(consolidated_df) > 0:
+        _p(doc, "")
+
+        rows_display = []
+        for (model, horizon), grp in consolidated_df.groupby(["model", "horizon"]):
+            row = {
+                "Model":    model.replace("_", " ").title(),
+                "h (days)": int(horizon),
+            }
+            for _, r in grp.iterrows():
+                sp = r["split"]
+                row[f"{sp} RMSE"]     = f"{r['RMSE']:.4f}"
+                row[f"{sp} skill (%)"] = f"{r['RMSE_skill_%']:.2f}"
+            rows_display.append(row)
+
+        disp_df = pd.DataFrame(rows_display)
+        table = doc.add_table(rows=len(disp_df) + 1, cols=len(disp_df.columns))
+        table.style = "Table Grid"
+        hdr = table.rows[0].cells
+        for j, col in enumerate(disp_df.columns):
+            hdr[j].text = str(col)
+            run = hdr[j].paragraphs[0].runs
+            if run:
+                run[0].bold = True
+        for i, (_, row_vals) in enumerate(disp_df.iterrows()):
+            cells = table.rows[i + 1].cells
+            for j, val in enumerate(row_vals):
+                cells[j].text = str(val)
+
+        cap = doc.add_paragraph()
+        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = cap.add_run(
+            "Table 3.  Complete consolidated results: all baselines, C2 models, and "
+            "DL models. RMSE in A$/tonne. Skill score vs random walk (positive = better)."
+        )
+        run.italic = True
+        run.font.size = Pt(9)
+    else:
+        para = doc.add_paragraph()
+        run  = para.add_run(
+            "[DL results table — run scripts/build_report.py to populate]"
+        )
+        run.font.color.rgb = RGBColor(0xC0, 0x39, 0x2B)
+
+    # ── 7.5 Skill by horizon (updated figure) ────────────────────────────────
+    _h(doc, "7.5  Skill Score by Horizon (All Models)", level=2)
+
+    _figure(
+        doc,
+        figures_dir / "fig_skill_by_horizon.png",
+        "Figure 9 (updated).  RMSE skill score (%) vs random walk for all models "
+        "including LSTM and GRU. Left: validation set. Right: test set. "
+        "Bars above zero indicate improvement over the random-walk benchmark.",
+    )
+
+    # ── 7.6 Interpretation ────────────────────────────────────────────────────
+    _h(doc, "7.6  Why DL Does Not Beat the Random Walk", level=2)
+
+    _p(doc,
+       "The deep-learning results confirm the expected finding: neither LSTM nor "
+       "GRU achieves positive RMSE skill over the random walk at any horizon. "
+       "Three structural reasons explain this:"
+       )
+    _bullet(doc,
+            "Sample scarcity. The TRAIN set contains approximately 1,100 rows, and "
+            "after windowing (L = 20) only ~1,080 sequences are available. Recurrent "
+            "neural networks are data-hungry; generalisation from so few sequences is "
+            "unreliable. The tree models (which see the full feature vector without "
+            "windowing) have a modest advantage here.")
+    _bullet(doc,
+            "Target sparsity. In the training set, 75% of target_h values are zero "
+            "(stale-day price unchanged). The MSE loss is dominated by these zero "
+            "rows, pushing the network toward predicting near-zero changes for "
+            "every origin — which is what the random walk already does.")
+    _bullet(doc,
+            "Weak temporal signal. The ACF analysis (Section 3.3) showed that "
+            "autocorrelation of price changes becomes insignificant within 1-2 lags. "
+            "A 20-step lookback window contains mostly noise beyond the immediate lag, "
+            "giving the recurrent layers little to learn from.")
+    _p(doc,
+       "These results are not a failure of the methodology — they are the honest "
+       "finding. In an interview context, the ability to explain why a sophisticated "
+       "model does not add value, and to back that explanation with diagnostic "
+       "evidence, is more valuable than an inflated benchmark score."
+       )

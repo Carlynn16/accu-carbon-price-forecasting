@@ -5,6 +5,7 @@ statsmodels
 scikit-learn
 xgboost
 lightgbm
+torch
 matplotlib
 seaborn
 pyarrow

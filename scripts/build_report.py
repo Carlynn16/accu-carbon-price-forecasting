@@ -33,10 +33,12 @@ from src.eda import (
 )
 from src.evaluate import build_results_table, compute_metrics, prepare_horizon
 from src.features import build_features, save_features
+from src.dl_models import run_dl_models
 from src.models import run_all_models
 from src.report import (
     build_baselines_section,
     build_data_section,
+    build_dl_section,
     build_eda_section,
     build_features_section,
     build_intro,
@@ -161,11 +163,19 @@ def main() -> None:
 
     print("Running ML models (RF, XGB, LGBM, SARIMAX)...")
     model_df = _compute_models(feat_train, feat_val, feat_test, full_price, baseline_df)
+
+    print("Running DL models (LSTM, GRU)...")
+    dl_df = run_dl_models(feat_train, feat_val, feat_test,
+                          horizons=(1, 7, 30), baseline_df=baseline_df)
+
     from src.evaluate import build_results_table as _brt
     consolidated_df = _brt(
-        pd.concat([baseline_df, model_df], ignore_index=True).to_dict("records")
+        pd.concat([baseline_df, model_df, dl_df], ignore_index=True).to_dict("records")
     )
     print(consolidated_df.to_string(index=False))
+
+    # Save consolidated results for downstream use
+    consolidated_df.to_parquet(PROCESSED / "model_results.parquet", index=False)
 
     print("Generating figures...")
     _ensure_figures(train, val, test, feat_train, stale_stats)
@@ -198,7 +208,8 @@ def main() -> None:
         "4. Feature Engineering",
         "5. Baselines and Evaluation Framework",
         "6. Modelling Results (RF, XGB, LGBM, SARIMAX)",
-        "[7. Explainability — to be added in Block E]",
+        "7. Deep Learning Results (LSTM, GRU)",
+        "[8. Explainability — to be added in Block E]",
     ]:
         doc.add_paragraph(line)
     doc.add_page_break()
@@ -220,6 +231,9 @@ def main() -> None:
     doc.add_page_break()
 
     build_modeling_section(doc, figures_dir=FIGURES, consolidated_df=consolidated_df)
+    doc.add_page_break()
+
+    build_dl_section(doc, figures_dir=FIGURES, consolidated_df=consolidated_df)
 
     # ── Save docx ───────────────────────────────────────────────────────────
     doc.save(DOCX_OUT)
