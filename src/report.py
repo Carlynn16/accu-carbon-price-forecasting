@@ -129,18 +129,19 @@ def build_intro(
     _p(doc,
        "The best point estimate is a modest +1.0% RMSE skill score at h = 1 (LSTM, "
        "test set), but this is within the range of statistical noise given the 247-row "
-       "test series. A faint directional signal (~57–60% accuracy on genuine-move days "
-       "at h = 1) is detectable but does not translate into a meaningful reduction in "
-       "forecast error."
+       "test series. A faint directional signal (~57–62% accuracy on genuine-move days "
+       "at h = 1, ranging from RF at 56.7% to SARIMAX at 61.9%) is detectable but does "
+       "not translate into a meaningful reduction in forecast error."
        )
 
     _p(doc,
-       "SHAP analysis of the best tree model (Random Forest, h = 1) reveals that the "
-       "model primarily learns to detect market staleness — whether the market is "
-       "actively trading or carrying forward the previous day's price. In the training "
-       "data, 75% of days are stale (zero price change); the random walk also predicts "
-       "zero change every day, so the model gains nothing over the baseline on stale days "
-       "and cannot compensate on the fewer genuine-move days."
+       "SHAP analysis of the best tree model (Random Forest, h = 1) identifies the "
+       "dominant drivers as recent realised momentum (chg_0, the most-recent daily change) "
+       "and the HIR cross-market price change (hir_chg), followed by chg_1 — a lagged "
+       "change that partly reflects the forward-fill artefact — and volume/volatility "
+       "metrics. No staleness feature (price_moved, days_since_last_move, moves_7d/30d) "
+       "appears in the top 8. These signals are real but weak: they are insufficient to "
+       "consistently generate lower forecast error than simply carrying today's price forward."
        )
 
     _p(doc,
@@ -258,8 +259,8 @@ def build_data_section(
         doc,
         figures_dir / "fig_target_dist_by_split.png",
         "Figure 2.  Price distribution by split (violin plot, left; overlaid histogram, "
-        "right). The training distribution is wide and left-skewed due to the 2021-22 spike; "
-        "validation and test occupy a narrower high-price regime.",
+        "right). The training distribution is wide and right-skewed due to the 2021-22 price "
+        "spike pulling the upper tail; validation and test occupy a narrower high-price regime.",
     )
 
 
@@ -342,9 +343,12 @@ def build_eda_section(
         pz_tr, pz_vl, pz_te = tr["pct_zero"], vl["pct_zero"], te["pct_zero"]
         mr_tr = tr["max_run"]
         nz_tr = tr["n_nonzero"]
+        # n_valid = len(split) - 1 (first diff is NaN); total rows = n_valid + 1
+        total_tr = tr.get("n_valid", nz_tr + round(nz_tr * pz_tr / (100 - pz_tr))) + 1
     else:
         pz_tr, pz_vl, pz_te = 75.1, 59.1, 45.7
         mr_tr, nz_tr = 34, 287
+        total_tr = 1155
 
     _p(doc,
        f"A critical but initially non-obvious feature of this market is its extreme illiquidity. "
@@ -352,8 +356,7 @@ def build_eda_section(
        f"— days on which at least one trade executes — are rare. On {pz_tr:.1f}% of training-set "
        f"days, the price does not change at all from the previous observation. The corresponding "
        f"figures are {pz_vl:.1f}% for the validation set and {pz_te:.1f}% for the test set. "
-       f"Only {nz_tr} of {nz_tr + round(nz_tr * pz_tr / (100 - pz_tr)):,} training observations "
-       f"represent genuine price moves."
+       f"Only {nz_tr} of {total_tr:,} training observations represent genuine price moves."
        )
 
     _p(doc,
@@ -925,17 +928,19 @@ def build_modeling_section(
             "the directional accuracy metric (Table 1) is more diagnostic for genuine "
             "price-discovery days.")
     _bullet(doc,
-            "The 25-feature matrix was designed to capture momentum (chg_0 as the "
-            "lag-1 carrier), staleness structure, and volatility regime. If tree models "
-            "achieve modest positive skill, this is the expected source. Negative skill "
-            "at longer horizons (h=30) would be unsurprising: the 30-day-ahead change "
-            "distribution is much wider and the mean-reversion implied by the "
-            "random-walk null is genuinely hard to beat.")
+            "Tree model performance on the test set: all three tree models (RF, XGB, "
+            "LightGBM) show negative or negligible skill at h = 1 and deteriorate "
+            "further at h = 7 and h = 30. XGB and LightGBM are significantly worse "
+            "than the random walk at h = 7 (positive DM stat, p < 0.05). The 25-feature "
+            "matrix captures momentum (chg_0) and staleness structure, but these signals "
+            "are insufficient to overcome the near-efficient, event-driven price dynamics.")
     _bullet(doc,
-            "SARIMAX serves as a sanity check. Because the price change series has "
-            "minimal linear autocorrelation (Section 3.3) and the model ignores all "
-            "exogenous features, it is expected to perform close to or worse than the "
-            "random walk at most horizons.")
+            "SARIMAX(1,1,1) result: close to but not significantly better than the "
+            "random walk at h = 1 (skill ≈ +0.5%), and worse at longer horizons. "
+            "Because the daily price-change series has minimal linear autocorrelation "
+            "(Section 3.3) and SARIMAX ignores all exogenous features, this result is "
+            "the expected confirmation that linear AR/MA structure alone carries no "
+            "forecasting value here.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1371,23 +1376,36 @@ def build_explainability_section(
     _h(doc, "9.2  Top Features by Mean |SHAP|", level=2)
 
     _p(doc,
-       "Figure E1 shows the feature importance ranking. Three feature groups dominate:"
+       "Table 6 and Figure E1 show the feature importance ranking. The top features are:"
        )
     _bullet(doc,
-            "Staleness features (days_since_last_move, price_moved, moves_7d/30d): "
-            "the model devotes significant capacity to detecting whether the market "
-            "is in a stale or active regime. In the training data, 75% of days have "
-            "zero price change, so regime identification is the single largest source "
-            "of predictable structure.")
+            "chg_0 (mean |SHAP| = 0.023 A$/tonne) — the most-recent realised daily "
+            "price change. This is the primary momentum carrier identified in the "
+            "ACF analysis (Section 3.3): a genuine lag-1 signal on active-trading days.")
     _bullet(doc,
-            "Recent momentum (chg_0 = most-recent day's change): the last realised "
-            "price change carries staleness information — a non-zero chg_0 signals "
-            "that the market was active yesterday. This feature is the primary "
-            "momentum carrier identified in the Block B ACF analysis.")
+            "hir_chg (0.020) — the first difference of the HIR (Human-Induced "
+            "Regeneration) ACCU price. HIR and Generic prices trade in the same "
+            "market; co-movement of their daily changes provides a cross-market "
+            "confirmation signal.")
     _bullet(doc,
-            "Lagged change chg_1 (and chg_2, chg_3): modest but non-negligible "
-            "importance, partly for genuine momentum persistence but partly via the "
-            "forward-fill artefact discussed in Section 9.3.")
+            "chg_1 (0.020) — the lagged change at t−2. This carries a mix of genuine "
+            "short-run momentum persistence and the forward-fill artefact discussed "
+            "in Section 9.3.")
+    _bullet(doc,
+            "hir_vol_trail7 (0.012), vol_generic_trail7 (0.008), vol_chg_7d (0.004) — "
+            "trailing volume and volatility metrics. These proxy for market activity "
+            "and liquidity-regime context.")
+    _bullet(doc,
+            "chg_5 (0.008) and month (0.004) — a longer-lag momentum feature and a "
+            "calendar seasonality signal.")
+    _p(doc,
+       "Notably, no staleness feature (price_moved, days_since_last_move, moves_7d, "
+       "moves_30d) appears in the top 8. The model's dominant signals are momentum "
+       "and cross-market co-movement — not regime classification per se. However, "
+       "these signals are weak in magnitude (largest mean |SHAP| = 0.023 A$/tonne "
+       "vs a random-walk RMSE of 0.32 A$/tonne on the test set) and insufficient "
+       "to consistently beat the random-walk baseline."
+       )
 
     if top8 is not None and len(top8) > 0:
         _p(doc, "")
@@ -1422,8 +1440,9 @@ def build_explainability_section(
         "Figure E1.  Feature importance for Random Forest (h = 1, test set) ranked "
         "by mean |SHAP| value. Red bars = momentum lag features (chg_*); "
         "green = staleness features; blue = volatility, volume, exogenous, calendar. "
-        "The model relies primarily on staleness structure and recent-change information "
-        "rather than multi-day momentum.",
+        "The dominant drivers are chg_0 (recent momentum) and hir_chg (HIR cross-market "
+        "change), with volume/volatility metrics in the mid-range. No staleness feature "
+        "appears in the top 8.",
     )
 
     # ── 9.3 chg_1 Dependence Plot ─────────────────────────────────────────────
@@ -1473,21 +1492,23 @@ def build_explainability_section(
        "on some data splits, but fail to beat the random walk significantly?"
        )
     _bullet(doc,
-            "The model has learned to identify stale vs active regimes (via staleness "
-            "features and chg_0), and in stale regimes it correctly predicts near-zero "
-            "change. But the random walk also predicts zero change on every day — "
-            "so the model gains nothing on stale days relative to the baseline.")
+            "The top SHAP features — chg_0, hir_chg, chg_1 — are all short-lag "
+            "momentum and cross-market signals. These carry genuine information "
+            "about the direction and magnitude of recent price moves. On stale days "
+            "(~46% of test), both the model and the random walk predict near-zero "
+            "change; the model offers no advantage here.")
     _bullet(doc,
             "On genuine-move days (where skill would matter most), the model's "
-            "directional accuracy is only ~57%, barely above the 50% random threshold. "
-            "The SHAP values on these days are driven by regime-detection features, "
-            "not directional price signals.")
+            "directional accuracy is ~57–62% (Section 8.3), marginally above the "
+            "50% random threshold. The momentum and cross-market signals are real "
+            "but do not produce large enough SHAP magnitudes (max 0.023 A$/tonne) "
+            "to dominate the residual error on these high-variance days.")
     _bullet(doc,
-            "The implication for longer horizons (h=7, 30) is direct: staleness "
-            "autocorrelation decays quickly (Section 3.3), so regime-detection "
-            "features become less reliable, and the model reverts to roughly "
-            "zero-prediction behaviour — matching the random walk but without "
-            "consistently beating it.")
+            "The implication for longer horizons (h = 7, 30) is direct: short-lag "
+            "momentum (chg_0, chg_1) decays within one to two steps, and the "
+            "cross-market HIR co-movement also becomes less predictable. At longer "
+            "horizons the model reverts toward zero-change prediction — matching "
+            "the random walk without consistently beating it.")
 
     # ── 9.5 DL Explainability Remark ─────────────────────────────────────────
     _h(doc, "9.5  Deep Learning Explainability (Qualitative)", level=2)
@@ -1497,11 +1518,10 @@ def build_explainability_section(
        "(LSTM, GRU) trained in Section 7. Gradient-based methods (Integrated Gradients, "
        "GradCAM) or SHAP KernelExplainer (model-agnostic, slow) could be applied, "
        "but given that both DL models fail to beat the random walk at any horizon, "
-       "detailed explainability analysis would likely confirm the same regime-detection "
-       "pattern observed in the RF: the networks learn to predict near-zero change on "
-       "stale days (where the training loss is dominated by zero-target rows), "
-       "contributing nothing beyond the RW baseline. This is a limitation acknowledged "
-       "for future work."
+       "detailed attribution analysis would likely identify a similar pattern to the RF: "
+       "short-lag momentum features (chg_0, chg_1) as primary drivers, with the network "
+       "reverting to near-zero predictions on stale days where the training loss is "
+       "dominated by zero-target rows. This is a limitation acknowledged for future work."
        )
 
 
