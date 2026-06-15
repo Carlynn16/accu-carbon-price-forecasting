@@ -12,3 +12,5 @@ __pycache__/
 *.pyc
 CONTEXT.md
 *.log
+Statistical_Report.docx
+Statistical_Report_backup.docx
