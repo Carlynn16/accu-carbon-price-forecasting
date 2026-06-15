@@ -607,8 +607,9 @@ def build_features_section(
         figures_dir / "fig_feature_target_corr.png",
         "Figure 8.  Pearson correlations of each feature with the 1-day-ahead target "
         "(target_1) on the training set. Positive (red) bars indicate momentum-aligned "
-        "features; negative (blue) bars indicate mean-reverting signals. The staleness "
-        "and lag features dominate the top rankings.",
+        "features; negative (blue) bars indicate mean-reverting signals. Lagged momentum "
+        "changes (chg_1, chg_3, chg_5), volume metrics, and calendar features dominate "
+        "the top correlation rankings.",
     )
 
 
@@ -1540,7 +1541,7 @@ def build_limitations_section(doc: "Document") -> None:
 
     _h(doc, "10.1  Small Effective Sample", level=2)
     _p(doc,
-       "The nominal training set contains 1,125 rows, but only approximately 287 of "
+       "The cleaned training set contains 1,155 rows, but only approximately 287 of "
        "these are genuine price-discovery days (days with non-zero price change). "
        "Statistical learning on 287 informative observations is severely constrained: "
        "tree models cannot reliably learn interactions between more than a handful of "
@@ -1648,12 +1649,14 @@ def build_conclusion_section(doc: "Document") -> None:
        )
 
     _p(doc,
-       "SHAP analysis of the best tree model revealed that the apparent marginal skill "
-       "at h = 1 derives almost entirely from regime detection — identifying whether the "
-       "market is in a stale (non-trading) or active state — rather than from genuine "
-       "directional price forecasting. Because the random walk also predicts zero change "
-       "on every day, the model gains nothing over the baseline on stale days, and its "
-       "advantage on genuine-move days is insufficient to be statistically significant."
+       "SHAP analysis of the best tree model (Random Forest, h = 1) identified the "
+       "dominant drivers as short-lag momentum (chg_0, the most-recent daily change) "
+       "and the HIR cross-market price change (hir_chg), with no staleness feature "
+       "(price_moved, days_since_last_move, moves_7d/30d) appearing in the top 8 "
+       "by mean absolute SHAP value. These momentum and cross-market signals are real, "
+       "but their average impact (≤ 0.023 A$/tonne) is too small relative to the "
+       "test-set random-walk RMSE (0.32 A$/tonne) to consistently produce lower "
+       "forecast error than simply carrying today's price forward."
        )
 
     _p(doc,
