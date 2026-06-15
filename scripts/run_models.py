@@ -63,7 +63,7 @@ def main() -> pd.DataFrame:
     baseline_df = _compute_baselines(feat_val, feat_test, full_price)
 
     print("Running models ...")
-    model_df = run_all_models(
+    model_df, _ = run_all_models(
         feat_train, feat_val, feat_test, full_price,
         horizons=HORIZONS, baseline_df=baseline_df,
     )

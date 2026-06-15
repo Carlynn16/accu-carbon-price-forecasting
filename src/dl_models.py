@@ -272,8 +272,12 @@ def _run_one_arch(
     horizons:    Sequence[int],
     baseline_df: pd.DataFrame | None,
     device:      torch.device,
-) -> list[dict]:
-    records: list[dict] = []
+) -> tuple[list[dict], list[dict]]:
+    """Returns (records, pred_records) for build_results_table and preds_df."""
+    records: list[dict]      = []
+    pred_records: list[dict] = []
+
+    import pandas as _pd
 
     for h in horizons:
         print(f"  {model_name} h={h}: building sequences ...")
@@ -302,6 +306,12 @@ def _run_one_arch(
             rw_rmse=rw_rmse_val, rw_mae=rw_mae_val,
         )
         records.append({"model": model_name, "horizon": h, "split": "val", **m_val})
+        for d, anch, act, p in zip(va["dates"], va["price_anchor"], va["y"], pred_val):
+            pred_records.append({
+                "model": model_name, "horizon": h, "split": "val",
+                "date": _pd.Timestamp(d), "pred_change": float(p),
+                "actual_change": float(act), "price_anchor": float(anch),
+            })
 
         # Phase 3 — refit on TRAIN+VAL, evaluate TEST once
         X_trval = torch.cat([X_tr, X_va], dim=0)
@@ -315,6 +325,12 @@ def _run_one_arch(
             rw_rmse=rw_rmse_te, rw_mae=rw_mae_te,
         )
         records.append({"model": model_name, "horizon": h, "split": "test", **m_te})
+        for d, anch, act, p in zip(te["dates"], te["price_anchor"], te["y"], pred_te):
+            pred_records.append({
+                "model": model_name, "horizon": h, "split": "test",
+                "date": _pd.Timestamp(d), "pred_change": float(p),
+                "actual_change": float(act), "price_anchor": float(anch),
+            })
 
         print(
             f"  {model_name} h={h}: stopped ep {best_epoch} | "
@@ -322,7 +338,7 @@ def _run_one_arch(
             f"test skill {m_te['RMSE_skill_%']:+.1f}%"
         )
 
-    return records
+    return records, pred_records
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -333,19 +349,22 @@ def run_dl_models(
     feat_test:   pd.DataFrame,
     horizons:    Sequence[int] = (1, 7, 30),
     baseline_df: pd.DataFrame | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run LSTM and GRU for all horizons.
-    Returns a tidy results DataFrame (same schema as C2).
+    Returns (results_df, preds_df) — same results schema as C2 plus raw predictions.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"DL device: {device}")
 
-    records: list[dict] = []
+    records: list[dict]      = []
+    pred_records: list[dict] = []
     for cls, name in [(LSTMRegressor, "lstm"), (GRURegressor, "gru")]:
         print(f"\n--- {name.upper()} ---")
-        records.extend(_run_one_arch(
+        recs, preds = _run_one_arch(
             cls, name, feat_train, feat_val, feat_test, horizons, baseline_df, device
-        ))
+        )
+        records.extend(recs)
+        pred_records.extend(preds)
 
-    return build_results_table(records)
+    return build_results_table(records), pd.DataFrame(pred_records)

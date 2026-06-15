@@ -12,6 +12,7 @@ Sections:
   build_baselines_section(doc, baseline_df)
   build_modeling_section(doc, figures_dir, consolidated_df)
   build_dl_section(doc, figures_dir, consolidated_df)
+  build_significance_section(doc, figures_dir, dm_table, dir_acc_table)
 """
 
 from pathlib import Path
@@ -1075,4 +1076,214 @@ def build_dl_section(
        "finding. In an interview context, the ability to explain why a sophisticated "
        "model does not add value, and to back that explanation with diagnostic "
        "evidence, is more valuable than an inflated benchmark score."
+       )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 8 — Statistical Significance (Diebold-Mariano Tests)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_significance_section(
+    doc:           "Document",
+    figures_dir:   Path,
+    dm_table:      "pd.DataFrame | None" = None,
+    dir_acc_table: "pd.DataFrame | None" = None,
+) -> None:
+    """Write Section 8: Diebold-Mariano significance tests + error analysis."""
+    import pandas as pd
+
+    _h(doc, "8. Statistical Significance (Diebold-Mariano Tests)")
+
+    _p(doc,
+       "Sections 6 and 7 reported point estimates of RMSE skill. This section "
+       "answers a stricter question: are any of the observed performance gaps "
+       "statistically distinguishable from chance, given the length of the test "
+       "series and the properties of the forecast errors?"
+       )
+
+    # ── 8.1 Test Design ──────────────────────────────────────────────────────
+    _h(doc, "8.1  Test Design", level=2)
+
+    _p(doc,
+       "The Diebold-Mariano (DM) test (Diebold & Mariano, 1995) compares two "
+       "competing forecast sequences by constructing the loss-differential series:"
+       )
+    _bullet(doc,
+            "d_t = L(e_model,t) − L(e_RW,t),  where L is squared error "
+            "(e_model,t = y_{t+h} − ŷ_{model,t+h}).")
+    _bullet(doc,
+            "H₀: E[d_t] = 0 (equal predictive accuracy). "
+            "H₁ (two-sided): models differ in expected loss.")
+    _bullet(doc,
+            "DM statistic: d̄ / sqrt(V̂/T), where V̂ is the Newey-West "
+            "(1987) HAC long-run variance with M = h−1 Bartlett lags — "
+            "accounting for the serial correlation that arises naturally in "
+            "h-step-ahead forecast errors.")
+    _bullet(doc,
+            "Small-sample correction: Harvey, Leybourne & Newbold (1997) "
+            "multiply the DM statistic by c = sqrt((T+1−2h+T⁻¹h(h−1))/T) "
+            "and compare against t(T−1) rather than N(0,1). "
+            "With T ≈ 220–247 observations this correction is material.")
+    _bullet(doc,
+            "Significance level: α = 0.05 (two-sided). "
+            "Negative DM stat → model outperforms RW. "
+            "Positive DM stat → model underperforms RW.")
+
+    # ── 8.2 Results ──────────────────────────────────────────────────────────
+    _h(doc, "8.2  Results: No Model Significantly Outperforms the Random Walk", level=2)
+
+    _p(doc,
+       "Table 4 shows the DM test results for every model at horizons "
+       "h ∈ {1, 7, 30} on the held-out test set (and, for comparison, on the "
+       "validation set). The headline finding is unambiguous:"
+       )
+    _bullet(doc,
+            "No model achieves a statistically significant improvement over the "
+            "random walk at any horizon on the test set (all p-values > 0.05).")
+    _bullet(doc,
+            "Small positive test skills at h=1 (LSTM ≈ +1.0%, SARIMAX ≈ +0.5%, "
+            "drift ≈ +0.2%) are within the noise range. Their DM statistics are "
+            "small and p-values are large.")
+    _bullet(doc,
+            "Several models are significantly WORSE than the random walk at "
+            "h=7 and h=30 (positive DM stat, p < 0.05), confirming that "
+            "attempting to forecast longer horizons with these features is "
+            "counter-productive.")
+
+    if dm_table is not None and len(dm_table) > 0:
+        _p(doc, "")
+
+        # Filter to test only for the main table; include val for context
+        test_dm = dm_table[dm_table["split"] == "test"].copy()
+
+        rows_disp: list[dict] = []
+        for _, r in test_dm.iterrows():
+            rows_disp.append({
+                "Model":   str(r["model"]).replace("_", " ").title(),
+                "h":       int(r["horizon"]),
+                "n_obs":   int(r["n_obs"]),
+                "DM stat": f"{r['DM_stat']:+.3f}",
+                "p-value": f"{r['p_value']:.4f}",
+                "Verdict": str(r["verdict"]),
+            })
+
+        disp_df = pd.DataFrame(rows_disp)
+        table   = doc.add_table(rows=len(disp_df) + 1, cols=len(disp_df.columns))
+        table.style = "Table Grid"
+        hdr = table.rows[0].cells
+        for j, col in enumerate(disp_df.columns):
+            hdr[j].text = str(col)
+            run = hdr[j].paragraphs[0].runs
+            if run:
+                run[0].bold = True
+        for i, (_, row_v) in enumerate(disp_df.iterrows()):
+            for j, val in enumerate(row_v):
+                table.rows[i + 1].cells[j].text = str(val)
+
+        cap = doc.add_paragraph()
+        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = cap.add_run(
+            "Table 4.  Diebold-Mariano test results (test set). "
+            "Loss = squared error. HAC: Newey-West Bartlett, M = h−1 lags. "
+            "HLN small-sample correction applied. α = 0.05, two-sided t(T−1). "
+            "Negative DM stat = model has lower loss than random walk."
+        )
+        run.italic = True
+        run.font.size = Pt(9)
+    else:
+        para = doc.add_paragraph()
+        run  = para.add_run("[DM results table — run scripts/build_report.py to populate]")
+        run.font.color.rgb = RGBColor(0xC0, 0x39, 0x2B)
+
+    # ── 8.3 Error Analysis by Market Regime ──────────────────────────────────
+    _h(doc, "8.3  Error Analysis by Market Regime", level=2)
+
+    _p(doc,
+       "ACCU prices exhibit a bimodal behaviour: roughly half the trading days "
+       "in the test set record no price change (stale days), while the remainder "
+       "are genuine-move days where prices shift. These two regimes have very "
+       "different forecasting difficulty."
+       )
+
+    _figure(
+        doc,
+        figures_dir / "fig_actual_vs_pred.png",
+        "Figure D1.  Actual next-day price level vs random-walk and best-model "
+        "forecasts on the test set (h = 1). The three lines nearly overlap, "
+        "illustrating why marginal RMSE differences are statistically insignificant.",
+    )
+
+    _figure(
+        doc,
+        figures_dir / "fig_error_by_regime.png",
+        "Figure D2.  RMSE decomposed into stale days (actual price change = 0) "
+        "and genuine-move days (actual price change ≠ 0), h = 1, test set. "
+        "All models achieve near-zero RMSE on stale days (trivially correct) "
+        "but have substantially higher errors on move days, confirming that the "
+        "genuine forecasting challenge lies in predicting when and by how much "
+        "prices move.",
+    )
+
+    if dir_acc_table is not None and len(dir_acc_table) > 0:
+        _p(doc,
+           "Table 5 shows directional accuracy restricted to genuine-move days "
+           "at h = 1 on the test set. The random walk — which always predicts "
+           "zero change — has 0% directional accuracy on move days by construction. "
+           "Models with positive directional accuracy are predicting the direction "
+           "of price moves, even if the magnitude is imprecise."
+           )
+        _p(doc, "")
+
+        da_disp = dir_acc_table.copy()
+        da_disp["model"] = da_disp["model"].str.replace("_", " ").str.title()
+        da_disp.columns  = ["Model", "n move-days", "Dir Acc move-days (%)"]
+
+        table2 = doc.add_table(rows=len(da_disp) + 1, cols=len(da_disp.columns))
+        table2.style = "Table Grid"
+        hdr2 = table2.rows[0].cells
+        for j, col in enumerate(da_disp.columns):
+            hdr2[j].text = str(col)
+            run = hdr2[j].paragraphs[0].runs
+            if run:
+                run[0].bold = True
+        for i, (_, row_v) in enumerate(da_disp.iterrows()):
+            for j, val in enumerate(row_v):
+                table2.rows[i + 1].cells[j].text = str(val)
+
+        cap2 = doc.add_paragraph()
+        cap2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run2 = cap2.add_run(
+            "Table 5.  Directional accuracy on genuine-move days only, h = 1, test set. "
+            "Excludes stale days (Δprice = 0) where any near-zero prediction is trivially correct."
+        )
+        run2.italic = True
+        run2.font.size = Pt(9)
+
+    # ── 8.4 Validation vs Test Overfitting Gap ────────────────────────────────
+    _h(doc, "8.4  Validation vs Test Overfitting Gap", level=2)
+
+    _p(doc,
+       "Comparing the DM test verdicts on the validation and test sets reveals "
+       "a recurring pattern: some models that appeared marginally better than "
+       "the random walk on validation fail to replicate that edge on the test set. "
+       "This is the hallmark of mild overfitting to the validation regime."
+       )
+    _bullet(doc,
+            "The validation period (mid-2021 to late-2022) covered the market's "
+            "high-volatility, high-price period. Features capturing momentum and "
+            "regime shifts were genuinely informative during this window.")
+    _bullet(doc,
+            "The test period (late-2022 to late-2024) is a lower-volatility, "
+            "range-bound regime. The random-walk RMSE itself is materially lower "
+            "(h=1: ~0.32 A$/tonne vs ~0.58 on val), leaving less absolute room "
+            "for any model to achieve a meaningfully lower error.")
+    _bullet(doc,
+            "The DM test on the test set is the appropriate final arbiter. "
+            "Val-period skill is informative for understanding model behaviour "
+            "but does not constitute out-of-sample evidence.")
+    _p(doc,
+       "The study's conclusion is therefore conservative and defensible: "
+       "no candidate model in this comparison achieves statistically significant "
+       "improvement over the random walk for ACCU spot price forecasting at "
+       "horizons 1, 7, or 30 days, given the available data."
        )

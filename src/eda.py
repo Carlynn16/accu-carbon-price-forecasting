@@ -661,3 +661,147 @@ def print_stats_summary(stats: dict) -> None:
           f"skew={ch['skew']:.2f}  excess-kurt={ch['kurtosis']:.0f}")
     print(f"  Heavy tails (extreme kurtosis); skewed left (large negative outliers).")
     print(sep)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure D1 — Actual vs predicted price level (Block D)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_actual_vs_pred(
+    preds_df:   "pd.DataFrame",
+    best_model: str,
+    outpath:    Path,
+) -> Path:
+    """
+    Time-series of actual vs predicted price level on TEST h=1.
+    Shows: actual next-day price, random-walk prediction (= today's price),
+    and the best model's prediction.
+    """
+    _set_style()
+
+    sub_rw = preds_df[
+        (preds_df["model"] == "random_walk") &
+        (preds_df["horizon"] == 1) &
+        (preds_df["split"] == "test")
+    ].sort_values("date")
+
+    sub_m = preds_df[
+        (preds_df["model"] == best_model) &
+        (preds_df["horizon"] == 1) &
+        (preds_df["split"] == "test")
+    ].sort_values("date")
+
+    if sub_rw.empty:
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.text(0.5, 0.5, "No test predictions available", ha="center", va="center")
+        fig.savefig(outpath, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return outpath
+
+    dates      = pd.to_datetime(sub_rw["date"])
+    actual_lvl = sub_rw["price_anchor"].to_numpy() + sub_rw["actual_change"].to_numpy()
+    rw_lvl     = sub_rw["price_anchor"].to_numpy()   # RW predicts no change
+
+    fig, ax = plt.subplots(figsize=(13, 4))
+    ax.plot(dates, actual_lvl, color="#2c3e50", linewidth=1.2, label="Actual price (t+1)")
+    ax.plot(dates, rw_lvl,     color="#e74c3c", linewidth=0.9, linestyle="--",
+            alpha=0.75, label="Random walk forecast")
+
+    if not sub_m.empty:
+        # Align on common dates
+        merged = sub_rw[["date", "price_anchor"]].merge(
+            sub_m[["date", "pred_change"]], on="date", how="inner"
+        )
+        m_dates = pd.to_datetime(merged["date"])
+        m_lvl   = merged["price_anchor"].to_numpy() + merged["pred_change"].to_numpy()
+        ax.plot(m_dates, m_lvl, color="#27ae60", linewidth=0.9, linestyle=":",
+                alpha=0.85, label=f"{best_model.replace('_', ' ')} forecast")
+
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price (A$/tonne)")
+    ax.set_title(
+        "Actual vs Forecast Price Level — TEST set, h = 1\n"
+        "Random-walk (no change) and best model both track the actual closely",
+        fontsize=11,
+    )
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure D2 — Error by market regime (stale vs move days)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_error_by_regime(
+    preds_df:       "pd.DataFrame",
+    outpath:        Path,
+    models_to_show: list | None = None,
+) -> Path:
+    """
+    Grouped bar chart of RMSE on stale days vs genuine-move days.
+    h=1, TEST split. Illustrates that all models struggle on move days.
+    """
+    _set_style()
+
+    if models_to_show is None:
+        models_to_show = ["random_walk", "drift", "sarimax", "random_forest", "lstm"]
+
+    sub = preds_df[
+        (preds_df["horizon"] == 1) &
+        (preds_df["split"] == "test")
+    ].copy()
+
+    available = [m for m in models_to_show if m in sub["model"].unique()]
+    if not available:
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.text(0.5, 0.5, "No data for regime plot", ha="center", va="center")
+        fig.savefig(outpath, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return outpath
+
+    stale_rmse: list[float] = []
+    move_rmse:  list[float] = []
+
+    for model in available:
+        m  = sub[sub["model"] == model]
+        st = m[m["actual_change"].abs() <= 1e-9]
+        mv = m[m["actual_change"].abs() >  1e-9]
+
+        def _rmse(df):
+            e = (df["actual_change"] - df["pred_change"]).to_numpy()
+            return float(np.sqrt(np.mean(e ** 2))) if len(e) > 0 else float("nan")
+
+        stale_rmse.append(_rmse(st))
+        move_rmse.append(_rmse(mv))
+
+    labels = [m.replace("_", " ") for m in available]
+    x      = np.arange(len(available))
+    w      = 0.38
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars1 = ax.bar(x - w / 2, stale_rmse, w, label="Stale days (Δprice = 0)",
+                   color="#5dade2", alpha=0.85, edgecolor="white")
+    bars2 = ax.bar(x + w / 2, move_rmse,  w, label="Move days  (Δprice ≠ 0)",
+                   color="#e67e22", alpha=0.85, edgecolor="white")
+
+    for bar, val in list(zip(bars1, stale_rmse)) + list(zip(bars2, move_rmse)):
+        if not np.isnan(val):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.004,
+                    f"{val:.3f}", ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=9, rotation=15, ha="right")
+    ax.set_ylabel("RMSE (A$/tonne)")
+    ax.set_title(
+        "Forecast Error by Market Regime — TEST set, h = 1\n"
+        "All models have much higher RMSE on genuine-move days than on stale days",
+        fontsize=11,
+    )
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return outpath

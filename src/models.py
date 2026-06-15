@@ -115,12 +115,14 @@ def run_tree_models(
     feat_test:   pd.DataFrame,
     horizons:    Sequence[int] = (1, 7, 30),
     baseline_df: pd.DataFrame | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     RF, XGB, LGBM: tune on TRAIN (walk-forward CV), predict VAL, refit on
-    TRAIN+VAL and predict TEST.  Returns tidy results DataFrame.
+    TRAIN+VAL and predict TEST.  Returns (results_df, preds_df).
+    preds_df columns: model, horizon, split, date, pred_change, actual_change, price_anchor.
     """
-    records: list[dict] = []
+    records: list[dict]      = []
+    pred_records: list[dict] = []
 
     for h in horizons:
         tr = prepare_horizon(feat_train, h)
@@ -149,6 +151,12 @@ def run_tree_models(
                 rw_rmse=rw_rmse_val, rw_mae=rw_mae_val,
             )
             records.append({"model": name, "horizon": h, "split": "val", **m_val})
+            for d, anch, act, p in zip(va["dates"], va["price_anchor"], va["y"], pred_val):
+                pred_records.append({
+                    "model": name, "horizon": h, "split": "val",
+                    "date": pd.Timestamp(d), "pred_change": float(p),
+                    "actual_change": float(act), "price_anchor": float(anch),
+                })
 
             # ── refit on TRAIN+VAL → eval TEST ────────────────────────────────
             X_trval = np.vstack([X_tr, X_va])
@@ -160,8 +168,14 @@ def run_tree_models(
                 rw_rmse=rw_rmse_te, rw_mae=rw_mae_te,
             )
             records.append({"model": name, "horizon": h, "split": "test", **m_te})
+            for d, anch, act, p in zip(te["dates"], te["price_anchor"], te["y"], pred_te):
+                pred_records.append({
+                    "model": name, "horizon": h, "split": "test",
+                    "date": pd.Timestamp(d), "pred_change": float(p),
+                    "actual_change": float(act), "price_anchor": float(anch),
+                })
 
-    return build_results_table(records)
+    return build_results_table(records), pd.DataFrame(pred_records)
 
 
 # ── SARIMAX ───────────────────────────────────────────────────────────────────
@@ -189,7 +203,7 @@ def run_sarimax(
     full_price:  pd.Series,
     horizons:    Sequence[int] = (1, 7, 30),
     baseline_df: pd.DataFrame | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     SARIMAX(1,1,1) univariate benchmark with rolling h-step-ahead forecasts.
 
@@ -201,6 +215,8 @@ def run_sarimax(
 
     Val:  parameters fit on train; Kalman pass over train+val.
     Test: parameters refit on train+val; Kalman pass over full series.
+
+    Returns (results_df, preds_df).
     """
     all_dates    = pd.to_datetime(full_price.index)
     date_to_pos  = {d: i for i, d in enumerate(all_dates)}
@@ -216,7 +232,8 @@ def run_sarimax(
     print("  SARIMAX: refitting on train+val ...")
     result_test = _sarimax_fit(full_arr[:n_trainval])
 
-    records: list[dict] = []
+    records: list[dict]      = []
+    pred_records: list[dict] = []
 
     for split_name, feat_df, result, n_apply_end in [
         ("val",  feat_val,  result_val,  n_trainval),
@@ -256,8 +273,14 @@ def run_sarimax(
                 rw_rmse=rw_rmse, rw_mae=rw_mae,
             )
             records.append({"model": "sarimax", "horizon": h, "split": split_name, **m})
+            for d, anch, act, p in zip(dates, data["price_anchor"], data["y"], preds):
+                pred_records.append({
+                    "model": "sarimax", "horizon": h, "split": split_name,
+                    "date": pd.Timestamp(d), "pred_change": float(p),
+                    "actual_change": float(act), "price_anchor": float(anch),
+                })
 
-    return build_results_table(records)
+    return build_results_table(records), pd.DataFrame(pred_records)
 
 
 # ── Consolidated entry point ──────────────────────────────────────────────────
@@ -269,19 +292,20 @@ def run_all_models(
     full_price:  pd.Series,
     horizons:    Sequence[int] = (1, 7, 30),
     baseline_df: pd.DataFrame | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Run RF, XGB, LGBM and SARIMAX.  Returns a combined results DataFrame
-    (same schema as build_results_table, without baselines).
-    Concatenate with baseline_df in the caller for the full consolidated table.
+    Run RF, XGB, LGBM and SARIMAX.  Returns (results_df, preds_df).
+    results_df: same schema as build_results_table, without baselines.
+    preds_df:   long-form predictions (model, horizon, split, date, pred_change, ...).
     """
     print("Tree models ...")
-    tree_df = run_tree_models(
+    tree_df, tree_preds = run_tree_models(
         feat_train, feat_val, feat_test, horizons, baseline_df=baseline_df
     )
     print("SARIMAX ...")
-    sarx_df = run_sarimax(
+    sarx_df, sarx_preds = run_sarimax(
         feat_val, feat_test, full_price, horizons, baseline_df=baseline_df
     )
-    combined = pd.concat([tree_df, sarx_df], ignore_index=True)
-    return build_results_table(combined.to_dict("records"))
+    combined  = pd.concat([tree_df, sarx_df], ignore_index=True)
+    all_preds = pd.concat([tree_preds, sarx_preds], ignore_index=True)
+    return build_results_table(combined.to_dict("records")), all_preds

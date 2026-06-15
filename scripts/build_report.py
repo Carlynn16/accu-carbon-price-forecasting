@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import numpy as np
 import pandas as pd
 from docx import Document
 from docx.shared import Pt
@@ -22,6 +23,8 @@ from src.eda import (
     compute_stationarity_tests,
     compute_staleness_stats,
     plot_acf_pacf,
+    plot_actual_vs_pred,
+    plot_error_by_regime,
     plot_feature_target_corr,
     plot_momentum,
     plot_price_timeline,
@@ -35,6 +38,7 @@ from src.evaluate import build_results_table, compute_metrics, prepare_horizon
 from src.features import build_features, save_features
 from src.dl_models import run_dl_models
 from src.models import run_all_models
+from src.significance import directional_accuracy_move_days, run_dm_tests
 from src.report import (
     build_baselines_section,
     build_data_section,
@@ -43,6 +47,7 @@ from src.report import (
     build_features_section,
     build_intro,
     build_modeling_section,
+    build_significance_section,
 )
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -61,7 +66,7 @@ def _ensure_figures(
     feat_train: pd.DataFrame,
     stale_stats: dict,
 ) -> None:
-    """Generate all figures (overwrites existing ones)."""
+    """Generate all EDA figures (overwrites existing ones)."""
     FIGURES.mkdir(parents=True, exist_ok=True)
     plot_price_timeline(train, val, test, FIGURES / "fig_price_timeline.png")
     plot_target_distributions(train, val, test, FIGURES / "fig_target_dist_by_split.png")
@@ -103,21 +108,50 @@ def _compute_baselines(
     return build_results_table(records)
 
 
-def _compute_models(
-    feat_train: pd.DataFrame,
+def _compute_baseline_preds(
     feat_val:   pd.DataFrame,
     feat_test:  pd.DataFrame,
     full_price: pd.Series,
-    baseline_df: pd.DataFrame,
-    horizons: tuple[int, ...] = (1, 7, 30),
+    horizons:   tuple[int, ...] = (1, 7, 30),
 ) -> pd.DataFrame:
-    """Run tree models + SARIMAX; return tidy results DataFrame (without baselines)."""
-    from src.evaluate import build_results_table
-    model_df = run_all_models(
+    """Return long-form predictions for RW and drift baselines."""
+    records: list[dict] = []
+    for h in horizons:
+        for split_name, feat_df in [("val", feat_val), ("test", feat_test)]:
+            data        = prepare_horizon(feat_df, h)
+            rw_preds    = np.zeros(data["n_rows"])
+            drift_preds = drift_predict(data["dates"], full_price, h)
+
+            for d, anch, act, rw_p, dr_p in zip(
+                data["dates"], data["price_anchor"], data["y"], rw_preds, drift_preds
+            ):
+                records.append({
+                    "model": "random_walk", "horizon": h, "split": split_name,
+                    "date": pd.Timestamp(d), "pred_change": float(rw_p),
+                    "actual_change": float(act), "price_anchor": float(anch),
+                })
+                records.append({
+                    "model": "drift", "horizon": h, "split": split_name,
+                    "date": pd.Timestamp(d), "pred_change": float(dr_p),
+                    "actual_change": float(act), "price_anchor": float(anch),
+                })
+    return pd.DataFrame(records)
+
+
+def _compute_models(
+    feat_train:  pd.DataFrame,
+    feat_val:    pd.DataFrame,
+    feat_test:   pd.DataFrame,
+    full_price:  pd.Series,
+    baseline_df: pd.DataFrame,
+    horizons:    tuple[int, ...] = (1, 7, 30),
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Run tree models + SARIMAX; return (results_df, preds_df)."""
+    model_df, model_preds = run_all_models(
         feat_train, feat_val, feat_test, full_price,
         horizons=horizons, baseline_df=baseline_df,
     )
-    return model_df
+    return model_df, model_preds
 
 
 def main() -> None:
@@ -133,7 +167,6 @@ def main() -> None:
     print(f"  feat_val:   {feat_val.shape}")
     print(f"  feat_test:  {feat_test.shape}")
 
-    # Feature count excludes metadata and target columns
     from src.evaluate import META_COLS
     feat_cols = [c for c in feat_train.columns if c not in META_COLS]
     feat_stats = {
@@ -162,11 +195,15 @@ def main() -> None:
     print(baseline_df.to_string(index=False))
 
     print("Running ML models (RF, XGB, LGBM, SARIMAX)...")
-    model_df = _compute_models(feat_train, feat_val, feat_test, full_price, baseline_df)
+    model_df, model_preds_df = _compute_models(
+        feat_train, feat_val, feat_test, full_price, baseline_df
+    )
 
     print("Running DL models (LSTM, GRU)...")
-    dl_df = run_dl_models(feat_train, feat_val, feat_test,
-                          horizons=(1, 7, 30), baseline_df=baseline_df)
+    dl_df, dl_preds_df = run_dl_models(
+        feat_train, feat_val, feat_test,
+        horizons=(1, 7, 30), baseline_df=baseline_df,
+    )
 
     from src.evaluate import build_results_table as _brt
     consolidated_df = _brt(
@@ -174,20 +211,55 @@ def main() -> None:
     )
     print(consolidated_df.to_string(index=False))
 
-    # Save consolidated results for downstream use
     consolidated_df.to_parquet(PROCESSED / "model_results.parquet", index=False)
 
-    print("Generating figures...")
+    # ── Collect and save raw predictions ─────────────────────────────────────
+    print("Collecting raw predictions for significance tests...")
+    baseline_preds_df = _compute_baseline_preds(feat_val, feat_test, full_price)
+    all_preds_df = pd.concat(
+        [baseline_preds_df, model_preds_df, dl_preds_df], ignore_index=True
+    )
+    all_preds_df.to_parquet(PROCESSED / "predictions_long.parquet", index=False)
+    print(f"  Saved predictions: {len(all_preds_df)} rows × {len(all_preds_df.columns)} cols")
+
+    # ── Diebold-Mariano significance tests ───────────────────────────────────
+    print("Running Diebold-Mariano tests...")
+    dm_table = run_dm_tests(all_preds_df)
+    print(dm_table.to_string(index=False))
+
+    # ── Directional accuracy on move-days ────────────────────────────────────
+    dir_acc_table = directional_accuracy_move_days(all_preds_df, h=1, split="test")
+    print("\nDir acc (move-days, h=1, test):")
+    print(dir_acc_table.to_string(index=False))
+
+    # ── Determine best model at h=1/test ─────────────────────────────────────
+    h1_test = consolidated_df[
+        (consolidated_df["horizon"] == 1) &
+        (consolidated_df["split"] == "test") &
+        (~consolidated_df["model"].isin(["random_walk"]))
+    ]
+    if not h1_test.empty:
+        best_model_h1 = h1_test.loc[h1_test["RMSE_skill_%"].idxmax(), "model"]
+    else:
+        best_model_h1 = "drift"
+    print(f"  Best model h=1/test: {best_model_h1}")
+
+    # ── Figures ───────────────────────────────────────────────────────────────
+    print("Generating EDA figures...")
     _ensure_figures(train, val, test, feat_train, stale_stats)
     plot_skill_by_horizon(consolidated_df, FIGURES / "fig_skill_by_horizon.png")
+
+    print("Generating significance figures...")
+    plot_actual_vs_pred(all_preds_df, best_model_h1, FIGURES / "fig_actual_vs_pred.png")
+    plot_error_by_regime(all_preds_df, FIGURES / "fig_error_by_regime.png")
 
     print("Computing stationarity statistics (train)...")
     stats = compute_stationarity_tests(train)
 
+    # ── Build Document ────────────────────────────────────────────────────────
     print("Building document...")
     doc = Document()
 
-    # ── Title page ─────────────────────────────────────────────────────────
     title = doc.add_heading("Forecasting Australian Carbon Credit Prices", level=0)
     sub = doc.add_paragraph("A Time-Series Study")
     sub.runs[0].italic = True
@@ -199,7 +271,6 @@ def main() -> None:
     date_para.runs[0].font.size = Pt(10)
     doc.add_page_break()
 
-    # ── Table of Contents placeholder ──────────────────────────────────────
     doc.add_heading("Contents", level=1)
     for line in [
         "1. Introduction",
@@ -209,12 +280,12 @@ def main() -> None:
         "5. Baselines and Evaluation Framework",
         "6. Modelling Results (RF, XGB, LGBM, SARIMAX)",
         "7. Deep Learning Results (LSTM, GRU)",
-        "[8. Explainability — to be added in Block E]",
+        "8. Statistical Significance (Diebold-Mariano Tests)",
+        "[9. Explainability — to be added in Block E]",
     ]:
         doc.add_paragraph(line)
     doc.add_page_break()
 
-    # ── Sections ────────────────────────────────────────────────────────────
     build_intro(doc, figures_dir=FIGURES, stats=stats)
     doc.add_page_break()
 
@@ -234,12 +305,15 @@ def main() -> None:
     doc.add_page_break()
 
     build_dl_section(doc, figures_dir=FIGURES, consolidated_df=consolidated_df)
+    doc.add_page_break()
 
-    # ── Save docx ───────────────────────────────────────────────────────────
+    build_significance_section(
+        doc, figures_dir=FIGURES, dm_table=dm_table, dir_acc_table=dir_acc_table
+    )
+
     doc.save(DOCX_OUT)
     print(f"Saved:  {DOCX_OUT}")
 
-    # ── Try PDF conversion (requires Microsoft Word on Windows) ─────────────
     try:
         from docx2pdf import convert
         convert(str(DOCX_OUT), str(PDF_OUT))
