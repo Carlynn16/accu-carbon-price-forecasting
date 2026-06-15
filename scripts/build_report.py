@@ -42,12 +42,14 @@ from src.models import run_all_models
 from src.significance import directional_accuracy_move_days, run_dm_tests
 from src.report import (
     build_baselines_section,
+    build_conclusion_section,
     build_data_section,
     build_dl_section,
     build_eda_section,
     build_explainability_section,
     build_features_section,
     build_intro,
+    build_limitations_section,
     build_modeling_section,
     build_significance_section,
 )
@@ -279,7 +281,7 @@ def main() -> None:
 
     doc.add_heading("Contents", level=1)
     for line in [
-        "1. Introduction",
+        "1. Introduction (with Executive Summary)",
         "2. Data and Cleaning",
         "3. Exploratory Analysis",
         "4. Feature Engineering",
@@ -288,6 +290,8 @@ def main() -> None:
         "7. Deep Learning Results (LSTM, GRU)",
         "8. Statistical Significance (Diebold-Mariano Tests)",
         "9. Model Explainability (SHAP)",
+        "10. Limitations",
+        "11. Conclusion and Future Work",
     ]:
         doc.add_paragraph(line)
     doc.add_page_break()
@@ -319,6 +323,12 @@ def main() -> None:
     doc.add_page_break()
 
     build_explainability_section(doc, figures_dir=FIGURES, top8=top8_shap)
+    doc.add_page_break()
+
+    build_limitations_section(doc)
+    doc.add_page_break()
+
+    build_conclusion_section(doc)
 
     doc.save(DOCX_OUT)
     print(f"Saved:  {DOCX_OUT}")

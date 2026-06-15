@@ -14,6 +14,8 @@ Sections:
   build_dl_section(doc, figures_dir, consolidated_df)
   build_significance_section(doc, figures_dir, dm_table, dir_acc_table)
   build_explainability_section(doc, figures_dir, top8)
+  build_limitations_section(doc)
+  build_conclusion_section(doc)
 """
 
 from pathlib import Path
@@ -111,13 +113,44 @@ def build_intro(
        "is fitted."
        )
 
-    # Executive summary placeholder
-    para = doc.add_paragraph()
-    run = para.add_run(
-        "[Executive summary — headline results to be completed in the final block]"
-    )
-    run.bold = True
-    run.font.color.rgb = RGBColor(0xC0, 0x39, 0x2B)
+    # ── Executive Summary ─────────────────────────────────────────────────────
+    _h(doc, "Executive Summary", level=2)
+
+    _p(doc,
+       "Across all three forecast horizons (h = 1, 7, and 30 calendar days) and all six "
+       "candidate models — Random Forest, XGBoost, LightGBM, SARIMAX, LSTM, and GRU — "
+       "no model achieves a statistically significant improvement in forecast accuracy "
+       "over a naive random-walk benchmark on the held-out test set. This result is "
+       "confirmed by the Diebold-Mariano test with Harvey-Leybourne-Newbold small-sample "
+       "correction (all p-values > 0.05 for the 'better than RW' hypothesis). "
+       "Several models are significantly worse than the random walk at h = 7 days."
+       )
+
+    _p(doc,
+       "The best point estimate is a modest +1.0% RMSE skill score at h = 1 (LSTM, "
+       "test set), but this is within the range of statistical noise given the 247-row "
+       "test series. A faint directional signal (~57–60% accuracy on genuine-move days "
+       "at h = 1) is detectable but does not translate into a meaningful reduction in "
+       "forecast error."
+       )
+
+    _p(doc,
+       "SHAP analysis of the best tree model (Random Forest, h = 1) reveals that the "
+       "model primarily learns to detect market staleness — whether the market is "
+       "actively trading or carrying forward the previous day's price. In the training "
+       "data, 75% of days are stale (zero price change); the random walk also predicts "
+       "zero change every day, so the model gains nothing over the baseline on stale days "
+       "and cannot compensate on the fewer genuine-move days."
+       )
+
+    _p(doc,
+       "The contribution of this study is therefore methodological: it demonstrates "
+       "the importance of rigorous benchmark comparisons, the Diebold-Mariano test as "
+       "the correct arbiter of forecasting skill, leakage-free feature construction, "
+       "and an honest engagement with the near-efficient, highly illiquid structure of "
+       "the Australian ACCU spot market. The random walk is the rational benchmark here, "
+       "and it is not beaten — a credible and defensible result."
+       )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1469,4 +1502,209 @@ def build_explainability_section(
        "stale days (where the training loss is dominated by zero-target rows), "
        "contributing nothing beyond the RW baseline. This is a limitation acknowledged "
        "for future work."
+       )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 10 — Limitations
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_limitations_section(doc: "Document") -> None:
+    """Write Section 10: Limitations."""
+    _h(doc, "10. Limitations")
+
+    _p(doc,
+       "This study is designed to be honest about the boundaries of its conclusions. "
+       "The following limitations should be considered when interpreting the results."
+       )
+
+    _h(doc, "10.1  Small Effective Sample", level=2)
+    _p(doc,
+       "The nominal training set contains 1,125 rows, but only approximately 287 of "
+       "these are genuine price-discovery days (days with non-zero price change). "
+       "Statistical learning on 287 informative observations is severely constrained: "
+       "tree models cannot reliably learn interactions between more than a handful of "
+       "features, and sequence models (LSTM, GRU) face an even more acute sample problem "
+       "after windowing. The true signal-to-noise ratio is far lower than the raw row "
+       "count suggests."
+       )
+
+    _h(doc, "10.2  Single Chronological Split and Regime Shift", level=2)
+    _p(doc,
+       "All models are evaluated on a single held-out test set covering late 2023 to "
+       "late 2024 — a low-volatility, range-bound regime that differs materially from "
+       "the high-volatility training period (2018–2022). This single-split evaluation "
+       "cannot distinguish between a model that generalises well across market regimes "
+       "and one that happens to perform well on this specific test window. Nested "
+       "walk-forward cross-validation across multiple non-overlapping test windows would "
+       "produce more reliable estimates, but requires a dataset roughly 3–5× larger than "
+       "the one available here."
+       )
+    _bullet(doc,
+            "The staleness fraction drops from 75.1% in training to 45.7% in test, "
+            "meaning the test set is structurally different from the training set in "
+            "exactly the dimension that dominates model behaviour (stale vs active regime)."
+            )
+
+    _h(doc, "10.3  Daily Frequency and Aggregation Choice", level=2)
+    _p(doc,
+       "Forecasting at the daily frequency amplifies the staleness problem: the majority "
+       "of calendar days are non-trading days where the price dataset carries forward "
+       "the last known value. A weekly or move-day-conditional modelling framework "
+       "would substantially improve the effective sample size and the signal-to-noise "
+       "ratio, at the cost of losing sub-weekly resolution."
+       )
+
+    _h(doc, "10.4  Limited Exogenous Feature Set", level=2)
+    _p(doc,
+       "The exogenous features used (sibling certificate price changes, HIR/SFM volume "
+       "metrics) are all drawn from the same market-data file. Several potentially "
+       "important drivers of ACCU price movements are absent:"
+       )
+    _bullet(doc,
+            "EU-ETS (European carbon market) prices and global carbon market sentiment.")
+    _bullet(doc,
+            "Australian energy prices (electricity, gas) and renewable-energy certificate "
+            "supply (LGC issuance, Renewable Energy Target compliance).")
+    _bullet(doc,
+            "Macro variables: AUD/USD exchange rate, commodity indices, interest rates.")
+    _bullet(doc,
+            "Policy events: Australian government policy announcements, Safeguard "
+            "Mechanism reforms, ERF auction outcomes.")
+    _bullet(doc,
+            "Order-book and market-microstructure data (bid-ask spread, depth, "
+            "OTC versus exchange volumes) that would directly capture liquidity regime.")
+    _p(doc,
+       "The absence of these variables is the most likely explanation for why no model "
+       "consistently beats the random walk: ACCU price moves appear to be primarily "
+       "driven by discrete, policy-event-triggered shocks that are not predictable "
+       "from lagged market data alone."
+       )
+
+    _h(doc, "10.5  Light DL Tuning", level=2)
+    _p(doc,
+       "The LSTM and GRU hyperparameter space is narrow by design (single layer, fixed "
+       "hidden size 64, fixed sequence length 20, dropout 0.2). A thorough architecture "
+       "search would include varying hidden size, number of layers, sequence length, "
+       "dropout rate, and learning-rate schedule. Given the small training set and the "
+       "tree-model results, there is no strong prior reason to expect a more thoroughly "
+       "tuned RNN to produce materially different conclusions — but it cannot be ruled out."
+       )
+
+    _h(doc, "10.6  DL Explainability Gap", level=2)
+    _p(doc,
+       "SHAP explainability was applied only to the best tree model (Random Forest, h=1). "
+       "Gradient-based attribution for LSTM and GRU was not implemented. This means the "
+       "DL results lack the feature-level interpretation provided for the tree models, "
+       "making it harder to diagnose why those architectures failed at specific horizons."
+       )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 11 — Conclusion and Future Work
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_conclusion_section(doc: "Document") -> None:
+    """Write Section 11: Conclusion and Future Work."""
+    _h(doc, "11. Conclusion and Future Work")
+
+    _h(doc, "11.1  Conclusion", level=2)
+
+    _p(doc,
+       "This study set out to determine whether any machine-learning or deep-learning "
+       "model can generate statistically significant forecasting improvements over the "
+       "random-walk benchmark for Australian ACCU Generic carbon-credit spot prices "
+       "at 1-, 7-, and 30-day horizons. The answer is unambiguous: no."
+       )
+
+    _p(doc,
+       "Six model classes — Random Forest, XGBoost, LightGBM, SARIMAX, LSTM, and GRU — "
+       "were evaluated using a rigorous, leakage-free pipeline. Walk-forward "
+       "cross-validation governed hyperparameter selection. Forecasting skill was assessed "
+       "by the Diebold-Mariano test with Harvey-Leybourne-Newbold small-sample correction. "
+       "At every horizon and for every model, the null hypothesis of equal predictive "
+       "accuracy versus the random walk could not be rejected at the 5% level. Several "
+       "models were significantly worse than the random walk at h = 7 days."
+       )
+
+    _p(doc,
+       "SHAP analysis of the best tree model revealed that the apparent marginal skill "
+       "at h = 1 derives almost entirely from regime detection — identifying whether the "
+       "market is in a stale (non-trading) or active state — rather than from genuine "
+       "directional price forecasting. Because the random walk also predicts zero change "
+       "on every day, the model gains nothing over the baseline on stale days, and its "
+       "advantage on genuine-move days is insufficient to be statistically significant."
+       )
+
+    _p(doc,
+       "The random walk is therefore the rational benchmark for ACCU spot price "
+       "forecasting at daily frequency with the available data and feature set. This is "
+       "a credible, defensible result that reflects the near-efficient, event-driven "
+       "structure of the Australian carbon market."
+       )
+
+    _h(doc, "11.2  Future Work", level=2)
+
+    _p(doc,
+       "The limitations identified in Section 10 suggest several directions that could "
+       "improve on the current analysis:"
+       )
+
+    _bullet(doc,
+            "Weekly or move-day aggregation.  Collapsing the data to weekly price "
+            "changes, or conditioning the analysis on genuine-move days only, would "
+            "substantially increase the effective sample size and reduce the "
+            "staleness-induced noise that dominates the current feature space. "
+            "This is the highest-priority structural change."
+            )
+    _bullet(doc,
+            "Richer exogenous drivers.  Incorporating EU-ETS prices, Australian "
+            "electricity and gas prices, Renewable Energy Certificate supply metrics, "
+            "macro variables, and policy-event indicators would directly address the "
+            "most likely source of predictable ACCU price variance. A structured "
+            "feature-selection step (e.g. LASSO with walk-forward CV) would then "
+            "identify which variables carry genuine incremental information."
+            )
+    _bullet(doc,
+            "Event-based modelling.  Given that ACCU price moves appear to be "
+            "triggered by discrete policy events (ERF auctions, Safeguard Mechanism "
+            "announcements, government procurement decisions), a point-process or "
+            "event-study framework may be more appropriate than a pure time-series "
+            "regression. A classifier that predicts the probability of a price move "
+            "occurring — rather than predicting the continuous change — could be a "
+            "more tractable first step."
+            )
+    _bullet(doc,
+            "Probabilistic and interval forecasts.  Point-forecast RMSE comparisons "
+            "mask the uncertainty structure of the predictions. Quantile regression "
+            "forests, conformalized prediction intervals, or Bayesian approaches would "
+            "produce calibrated uncertainty estimates — arguably more useful for "
+            "carbon-market participants (who care about tail-risk) than a point forecast."
+            )
+    _bullet(doc,
+            "Longer historical series.  The current dataset begins in January 2018, "
+            "giving approximately 6.5 years of data. Extending back to the ERF's "
+            "inaugural auctions (2015–2016) and forward to more recent data would "
+            "increase the training-set effective sample size and provide more regime "
+            "diversity for evaluation."
+            )
+    _bullet(doc,
+            "Nested cross-validation.  A proper multi-window walk-forward evaluation "
+            "(multiple non-overlapping test windows, each preceded by a training+tuning "
+            "period) would reduce the variance of the skill-score estimate and provide "
+            "more reliable evidence about model generalisation across market regimes."
+            )
+    _bullet(doc,
+            "DL attribution.  Applying gradient-based attribution (Integrated Gradients, "
+            "GradCAM) or SHAP KernelExplainer to the LSTM and GRU architectures would "
+            "close the explainability gap noted in Section 10.6, allowing a direct "
+            "comparison of what tree models and recurrent models rely on."
+            )
+
+    _p(doc,
+       "In summary, the most productive direction is not model complexity but data "
+       "enrichment and frequency transformation. The current finding — that no tested "
+       "model beats the random walk — is most naturally interpreted as an information "
+       "deficit rather than a modelling failure: the features available at daily frequency "
+       "do not contain enough signal to outperform the simplest possible baseline."
        )

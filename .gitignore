@@ -4,6 +4,9 @@ data/**
 !data/processed/
 !data/**/.gitkeep
 figures/*.png
+!figures/fig_price_timeline.png
+!figures/fig_skill_by_horizon.png
+!figures/fig_shap_summary.png
 venv/
 __pycache__/
 *.pyc
