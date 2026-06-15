@@ -13,6 +13,7 @@ Sections:
   build_modeling_section(doc, figures_dir, consolidated_df)
   build_dl_section(doc, figures_dir, consolidated_df)
   build_significance_section(doc, figures_dir, dm_table, dir_acc_table)
+  build_explainability_section(doc, figures_dir, top8)
 """
 
 from pathlib import Path
@@ -1286,4 +1287,186 @@ def build_significance_section(
        "no candidate model in this comparison achieves statistically significant "
        "improvement over the random walk for ACCU spot price forecasting at "
        "horizons 1, 7, or 30 days, given the available data."
+       )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 9 — Model Explainability (SHAP)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_explainability_section(
+    doc:         "Document",
+    figures_dir: Path,
+    top8:        "pd.DataFrame | None" = None,
+) -> None:
+    """Write Section 9: SHAP explainability for the best tree model (RF, h=1)."""
+    import pandas as pd
+
+    _h(doc, "9. Model Explainability (SHAP)")
+
+    _p(doc,
+       "This section explains what the best-performing tree model (Random Forest at h=1) "
+       "actually learned from the data. The goal is not to justify the model's performance — "
+       "Section 8 established that no model significantly beats the random walk — but to "
+       "understand which features drove the model's decisions and whether those patterns "
+       "are economically meaningful or artefacts of the data structure."
+       )
+
+    # ── 9.1 Method ────────────────────────────────────────────────────────────
+    _h(doc, "9.1  Method: SHAP TreeExplainer", level=2)
+
+    _p(doc,
+       "SHAP (SHapley Additive exPlanations; Lundberg & Lee, 2017) assigns each feature "
+       "a contribution value for each individual prediction. For tree ensembles, "
+       "TreeExplainer computes exact SHAP values in polynomial time using the tree "
+       "structure — no sampling approximation."
+       )
+    _bullet(doc,
+            "Additivity: for each test observation, SHAP values sum exactly to "
+            "model_output(x) − E[f(X)], where E[f(X)] is the base value "
+            "(model's mean output over training). Verified by the test suite.")
+    _bullet(doc,
+            "Feature importance: mean |SHAP| across the test set is used as the "
+            "global importance metric — proportional to each feature's average "
+            "absolute impact on the predicted price change.")
+    _bullet(doc,
+            "The same RF hyperparameters and TRAIN+VAL refit procedure as Block C2 "
+            "were used, so the SHAP values reflect the model actually evaluated in "
+            "Section 6.")
+
+    # ── 9.2 Top Features ──────────────────────────────────────────────────────
+    _h(doc, "9.2  Top Features by Mean |SHAP|", level=2)
+
+    _p(doc,
+       "Figure E1 shows the feature importance ranking. Three feature groups dominate:"
+       )
+    _bullet(doc,
+            "Staleness features (days_since_last_move, price_moved, moves_7d/30d): "
+            "the model devotes significant capacity to detecting whether the market "
+            "is in a stale or active regime. In the training data, 75% of days have "
+            "zero price change, so regime identification is the single largest source "
+            "of predictable structure.")
+    _bullet(doc,
+            "Recent momentum (chg_0 = most-recent day's change): the last realised "
+            "price change carries staleness information — a non-zero chg_0 signals "
+            "that the market was active yesterday. This feature is the primary "
+            "momentum carrier identified in the Block B ACF analysis.")
+    _bullet(doc,
+            "Lagged change chg_1 (and chg_2, chg_3): modest but non-negligible "
+            "importance, partly for genuine momentum persistence but partly via the "
+            "forward-fill artefact discussed in Section 9.3.")
+
+    if top8 is not None and len(top8) > 0:
+        _p(doc, "")
+        disp = top8.copy()
+        disp.columns = ["Feature", "Mean |SHAP| (A$/tonne)"]
+
+        table = doc.add_table(rows=len(disp) + 1, cols=2)
+        table.style = "Table Grid"
+        hdr = table.rows[0].cells
+        for j, col in enumerate(disp.columns):
+            hdr[j].text = str(col)
+            run = hdr[j].paragraphs[0].runs
+            if run:
+                run[0].bold = True
+        for i, (_, row_v) in enumerate(disp.iterrows()):
+            for j, val in enumerate(row_v):
+                table.rows[i + 1].cells[j].text = str(val)
+
+        cap = doc.add_paragraph()
+        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = cap.add_run(
+            "Table 6.  Top-8 features by mean |SHAP| for Random Forest at h = 1 "
+            "on the test set. SHAP values measure each feature's average absolute "
+            "impact on the predicted price change (A$/tonne)."
+        )
+        run.italic = True
+        run.font.size = Pt(9)
+
+    _figure(
+        doc,
+        figures_dir / "fig_shap_summary.png",
+        "Figure E1.  Feature importance for Random Forest (h = 1, test set) ranked "
+        "by mean |SHAP| value. Red bars = momentum lag features (chg_*); "
+        "green = staleness features; blue = volatility, volume, exogenous, calendar. "
+        "The model relies primarily on staleness structure and recent-change information "
+        "rather than multi-day momentum.",
+    )
+
+    # ── 9.3 chg_1 Dependence Plot ─────────────────────────────────────────────
+    _h(doc, "9.3  The Forward-Fill Artefact in chg_1", level=2)
+
+    _p(doc,
+       "The dependence plot for chg_1 (the penultimate day's price change) in "
+       "Figure E2 reveals an important pattern. Large absolute values of chg_1 "
+       "— corresponding to a genuine price move two days ago — are associated with "
+       "elevated SHAP magnitude, but the direction of the SHAP contribution is "
+       "coloured by chg_0 (yesterday's change)."
+       )
+    _bullet(doc,
+            "When chg_1 is large and positive but chg_0 is zero (a stale day "
+            "following a genuine up-move), the model has learned to expect continued "
+            "staleness — this is a real and useful regime signal.")
+    _bullet(doc,
+            "However, the same pattern is partly an artefact of the forward-fill "
+            "imputation: after a genuine move at t−2, the imputed values at t−1 and "
+            "t retain the same price level (zero change), creating a mechanical "
+            "sequence of (non-zero chg_1, zero chg_0) that dominates the feature "
+            "space on stale days. The model learns this sequence but it does not "
+            "represent a tradeable momentum signal — it is the market being closed "
+            "or un-traded, not a directional forecast.")
+    _bullet(doc,
+            "Practically: the model's attention to chg_1 is approximately equivalent "
+            "to detecting 'was there a move two days ago?' — which is a staleness "
+            "signal, not a price-direction signal. This is consistent with near-zero "
+            "directional accuracy on genuine move-days (Section 8.3).")
+
+    _figure(
+        doc,
+        figures_dir / "fig_shap_dependence_chg1.png",
+        "Figure E2.  SHAP dependence plot for chg_1 (change at t−2), h = 1, test set. "
+        "Each point is one test observation; colour = chg_0 (most-recent change). "
+        "The pattern shows that large prior moves raise the model's attention — "
+        "partly a genuine staleness regime signal, partly the forward-fill artefact "
+        "where a move at t−2 is followed mechanically by zero chg_0.",
+    )
+
+    # ── 9.4 Why SHAP Confirms the DM Finding ─────────────────────────────────
+    _h(doc, "9.4  Interpretation: Regime Detection, Not Price Discovery", level=2)
+
+    _p(doc,
+       "Taken together, the SHAP analysis resolves the apparent paradox of Section 6: "
+       "why does the Random Forest achieve marginally positive skill (+−3%) at h=1 "
+       "on some data splits, but fail to beat the random walk significantly?"
+       )
+    _bullet(doc,
+            "The model has learned to identify stale vs active regimes (via staleness "
+            "features and chg_0), and in stale regimes it correctly predicts near-zero "
+            "change. But the random walk also predicts zero change on every day — "
+            "so the model gains nothing on stale days relative to the baseline.")
+    _bullet(doc,
+            "On genuine-move days (where skill would matter most), the model's "
+            "directional accuracy is only ~57%, barely above the 50% random threshold. "
+            "The SHAP values on these days are driven by regime-detection features, "
+            "not directional price signals.")
+    _bullet(doc,
+            "The implication for longer horizons (h=7, 30) is direct: staleness "
+            "autocorrelation decays quickly (Section 3.3), so regime-detection "
+            "features become less reliable, and the model reverts to roughly "
+            "zero-prediction behaviour — matching the random walk but without "
+            "consistently beating it.")
+
+    # ── 9.5 DL Explainability Remark ─────────────────────────────────────────
+    _h(doc, "9.5  Deep Learning Explainability (Qualitative)", level=2)
+
+    _p(doc,
+       "SHAP TreeExplainer is not directly applicable to the recurrent architectures "
+       "(LSTM, GRU) trained in Section 7. Gradient-based methods (Integrated Gradients, "
+       "GradCAM) or SHAP KernelExplainer (model-agnostic, slow) could be applied, "
+       "but given that both DL models fail to beat the random walk at any horizon, "
+       "detailed explainability analysis would likely confirm the same regime-detection "
+       "pattern observed in the RF: the networks learn to predict near-zero change on "
+       "stale days (where the training loss is dominated by zero-target rows), "
+       "contributing nothing beyond the RW baseline. This is a limitation acknowledged "
+       "for future work."
        )

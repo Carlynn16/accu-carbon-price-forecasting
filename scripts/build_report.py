@@ -37,6 +37,7 @@ from src.eda import (
 from src.evaluate import build_results_table, compute_metrics, prepare_horizon
 from src.features import build_features, save_features
 from src.dl_models import run_dl_models
+from src.explain import run_explain
 from src.models import run_all_models
 from src.significance import directional_accuracy_move_days, run_dm_tests
 from src.report import (
@@ -44,6 +45,7 @@ from src.report import (
     build_data_section,
     build_dl_section,
     build_eda_section,
+    build_explainability_section,
     build_features_section,
     build_intro,
     build_modeling_section,
@@ -253,6 +255,10 @@ def main() -> None:
     plot_actual_vs_pred(all_preds_df, best_model_h1, FIGURES / "fig_actual_vs_pred.png")
     plot_error_by_regime(all_preds_df, FIGURES / "fig_error_by_regime.png")
 
+    print("Running SHAP explainability (RF, h=1)...")
+    explain_result = run_explain(feat_train, feat_val, feat_test, figures_dir=FIGURES)
+    top8_shap = explain_result["top8"]
+
     print("Computing stationarity statistics (train)...")
     stats = compute_stationarity_tests(train)
 
@@ -281,7 +287,7 @@ def main() -> None:
         "6. Modelling Results (RF, XGB, LGBM, SARIMAX)",
         "7. Deep Learning Results (LSTM, GRU)",
         "8. Statistical Significance (Diebold-Mariano Tests)",
-        "[9. Explainability — to be added in Block E]",
+        "9. Model Explainability (SHAP)",
     ]:
         doc.add_paragraph(line)
     doc.add_page_break()
@@ -310,6 +316,9 @@ def main() -> None:
     build_significance_section(
         doc, figures_dir=FIGURES, dm_table=dm_table, dir_acc_table=dir_acc_table
     )
+    doc.add_page_break()
+
+    build_explainability_section(doc, figures_dir=FIGURES, top8=top8_shap)
 
     doc.save(DOCX_OUT)
     print(f"Saved:  {DOCX_OUT}")

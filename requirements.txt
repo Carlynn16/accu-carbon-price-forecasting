@@ -6,6 +6,7 @@ scikit-learn
 xgboost
 lightgbm
 torch
+shap
 matplotlib
 seaborn
 pyarrow
