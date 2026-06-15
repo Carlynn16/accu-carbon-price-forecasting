@@ -22,6 +22,8 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
@@ -47,6 +49,44 @@ def _bold_inline(doc: Document, label: str, rest: str) -> None:
     run = para.add_run(label)
     run.bold = True
     para.add_run(rest)
+
+
+def _style_table(
+    table,
+    col_widths_inches: list,
+    font_pt: float = 8.5,
+) -> None:
+    """Apply fixed column widths and compact font size to every cell in a table.
+
+    Forces 'fixed' layout so Word honours the specified widths and numeric
+    values never wrap mid-digit across lines.
+    """
+    # Switch to fixed layout
+    tblPr = table._tbl.tblPr
+    for el in tblPr.findall(qn("w:tblLayout")):
+        tblPr.remove(el)
+    layout = OxmlElement("w:tblLayout")
+    layout.set(qn("w:type"), "fixed")
+    tblPr.append(layout)
+
+    for row in table.rows:
+        for j, cell in enumerate(row.cells):
+            # Set preferred cell width (dxa = twentieths of a point; 1 inch = 1440 dxa)
+            if j < len(col_widths_inches):
+                tcPr = cell._tc.get_or_add_tcPr()
+                for el in tcPr.findall(qn("w:tcW")):
+                    tcPr.remove(el)
+                tcW = OxmlElement("w:tcW")
+                tcW.set(qn("w:w"), str(int(col_widths_inches[j] * 1440)))
+                tcW.set(qn("w:type"), "dxa")
+                tcPr.append(tcW)
+
+            # Compact spacing + font size
+            for para in cell.paragraphs:
+                para.paragraph_format.space_before = Pt(1)
+                para.paragraph_format.space_after = Pt(1)
+                for run in para.runs:
+                    run.font.size = Pt(font_pt)
 
 
 def _figure(
@@ -709,54 +749,64 @@ def build_baselines_section(
     _h(doc, "5.4  Baseline Performance", level=2)
 
     _p(doc,
-       "Table 1 reports RMSE, MAE, MAPE, and directional accuracy for the random-walk "
-       "and drift baselines on the validation and test sets. Skill scores for the drift "
-       "are relative to the random walk. By construction, the random-walk skill score "
-       "is 0% for every horizon."
+       "Tables 1a and 1b report RMSE, MAE, MAPE, and directional accuracy for the "
+       "random-walk and drift baselines on the test set (Table 1a) and validation set "
+       "(Table 1b). Skill scores for the drift are relative to the random walk. "
+       "By construction, the random-walk skill score is 0% for every horizon."
        )
 
-    if baseline_df is not None and len(baseline_df) > 0:
-        # ── format a compact table: pivot split into column groups ─────────
-        _p(doc, "")  # spacer
+    # Column widths: Model 0.90, h 0.28, RMSE 0.68, MAE 0.68, MAPE% 0.65,
+    #                dir_acc% 0.72, RMSE_skill% 0.72  (total ≈ 4.63")
+    _T1_WIDTHS = [0.90, 0.28, 0.68, 0.68, 0.65, 0.72, 0.72]
+    _T1_COLS   = ["Model", "h", "RMSE", "MAE", "MAPE%", "dir_acc%", "RMSE_skill%"]
 
-        # Build display table
+    def _build_split_table(split_name: str, label: str) -> None:
+        """Build one baseline table for a single split."""
         rows_display = []
         for (model, horizon), grp in baseline_df.groupby(["model", "horizon"]):
-            row = {"Model": model.replace("_", " ").title(), "h": horizon}
-            for _, r in grp.iterrows():
-                sp = r["split"]
-                row[f"{sp} RMSE"]        = f"{r['RMSE']:.4f}"
-                row[f"{sp} MAE"]         = f"{r['MAE']:.4f}"
-                row[f"{sp} MAPE_%"]      = f"{r['MAPE_%']:.2f}"
-                row[f"{sp} dir_acc_%"]   = f"{r['dir_acc_%']:.1f}"
-                row[f"{sp} RMSE_skill%"] = f"{r['RMSE_skill_%']:.2f}"
-            rows_display.append(row)
-
-        disp_df = pd.DataFrame(rows_display)
-
-        # ── python-docx table ─────────────────────────────────────────────
-        table = doc.add_table(rows=len(disp_df) + 1, cols=len(disp_df.columns))
-        table.style = "Table Grid"
-        hdr_cells = table.rows[0].cells
-        for j, col in enumerate(disp_df.columns):
-            hdr_cells[j].text = str(col)
-            run = hdr_cells[j].paragraphs[0].runs
-            if run:
-                run[0].bold = True
+            r = grp[grp["split"] == split_name]
+            if r.empty:
+                continue
+            r = r.iloc[0]
+            rows_display.append({
+                "Model":        model.replace("_", " ").title(),
+                "h":            int(horizon),
+                "RMSE":         f"{r['RMSE']:.4f}",
+                "MAE":          f"{r['MAE']:.4f}",
+                "MAPE%":        f"{r['MAPE_%']:.2f}",
+                "dir_acc%":     f"{r['dir_acc_%']:.1f}",
+                "RMSE_skill%":  f"{r['RMSE_skill_%']:.2f}",
+            })
+        if not rows_display:
+            return
+        disp_df = pd.DataFrame(rows_display, columns=_T1_COLS)
+        tbl = doc.add_table(rows=len(disp_df) + 1, cols=len(_T1_COLS))
+        tbl.style = "Table Grid"
+        hdr = tbl.rows[0].cells
+        for j, col in enumerate(_T1_COLS):
+            hdr[j].text = col
+            runs = hdr[j].paragraphs[0].runs
+            if runs:
+                runs[0].bold = True
         for i, (_, row_vals) in enumerate(disp_df.iterrows()):
-            data_cells = table.rows[i + 1].cells
             for j, val in enumerate(row_vals):
-                data_cells[j].text = str(val)
-
+                tbl.rows[i + 1].cells[j].text = str(val)
+        _style_table(tbl, _T1_WIDTHS)
         cap = doc.add_paragraph()
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = cap.add_run(
-            "Table 1.  Baseline performance on validation and test sets. "
-            "RMSE and MAE in A\\$/tonne. MAPE and dir_acc in %. "
+            f"{label}  Baseline performance on the {split_name} set. "
+            "RMSE and MAE in A$/tonne. MAPE and dir_acc in %. "
             "Skill scores relative to the random-walk baseline (positive = better)."
         )
         run.italic = True
         run.font.size = Pt(9)
+
+    if baseline_df is not None and len(baseline_df) > 0:
+        _p(doc, "")
+        _build_split_table("test", "Table 1a.")
+        _p(doc, "")
+        _build_split_table("val",  "Table 1b.")
     else:
         para = doc.add_paragraph()
         run  = para.add_run("[Baseline results table — to be inserted after running baselines]")
@@ -881,6 +931,8 @@ def build_modeling_section(
             data_cells = table.rows[i + 1].cells
             for j, val in enumerate(row_vals):
                 data_cells[j].text = str(val)
+        # Model 1.20, h(days) 0.48, val RMSE 0.75, val skill 0.80, test RMSE 0.75, test skill 0.80
+        _style_table(table, [1.20, 0.48, 0.75, 0.80, 0.75, 0.80])
 
         cap = doc.add_paragraph()
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1060,6 +1112,8 @@ def build_dl_section(
             cells = table.rows[i + 1].cells
             for j, val in enumerate(row_vals):
                 cells[j].text = str(val)
+        # Model 1.20, h(days) 0.48, val RMSE 0.75, val skill 0.80, test RMSE 0.75, test skill 0.80
+        _style_table(table, [1.20, 0.48, 0.75, 0.80, 0.75, 0.80])
 
         cap = doc.add_paragraph()
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1219,6 +1273,8 @@ def build_significance_section(
         for i, (_, row_v) in enumerate(disp_df.iterrows()):
             for j, val in enumerate(row_v):
                 table.rows[i + 1].cells[j].text = str(val)
+        # Model 1.20, h 0.28, n_obs 0.55, DM stat 0.72, p-value 0.72, Verdict 1.60
+        _style_table(table, [1.20, 0.28, 0.55, 0.72, 0.72, 1.60])
 
         cap = doc.add_paragraph()
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1289,6 +1345,8 @@ def build_significance_section(
         for i, (_, row_v) in enumerate(da_disp.iterrows()):
             for j, val in enumerate(row_v):
                 table2.rows[i + 1].cells[j].text = str(val)
+        # Model 1.50, n move-days 0.95, Dir Acc move-days (%) 1.30
+        _style_table(table2, [1.50, 0.95, 1.30])
 
         cap2 = doc.add_paragraph()
         cap2.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1424,6 +1482,8 @@ def build_explainability_section(
         for i, (_, row_v) in enumerate(disp.iterrows()):
             for j, val in enumerate(row_v):
                 table.rows[i + 1].cells[j].text = str(val)
+        # Feature 1.80, Mean |SHAP| (A$/tonne) 1.80
+        _style_table(table, [1.80, 1.80])
 
         cap = doc.add_paragraph()
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
